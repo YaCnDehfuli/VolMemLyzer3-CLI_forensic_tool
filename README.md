@@ -4,6 +4,8 @@
 ![Python](https://img.shields.io/badge/Python-3.9+-blue)
 ![Volatility](https://img.shields.io/badge/Volatility-3.x-black)
 
+**Technical focus:** DFIR automation · volatile-memory analysis · Volatility 3 · concurrent extraction · IoC correlation · analyst triage
+
 **VolMemLyzer** is a modular memory forensics toolkit that wraps **Volatility 3** with three complementary workflows:
 
 1) **Run mode** – ergonomic “Volatility-as-a-service”: run plugins in parallel, cache outputs, and keep artifact naming/dirs predictable for downstream code.  
@@ -157,19 +159,10 @@ In v3, if you don’t pass --vol-path, VolMemLyzer automatically resolves Volati
 
 ## Installation
 
-### From PyPI (recommended once published)
+### From source (recommended)
 ```bash
-pip install volmemlyzer
-# then the CLI is available as:
-volmemlyzer --help
-```
-
-<!-- you should see the help page like this: ![alt text](image.png) -->
-
-### From source (develop/editable)
-```bash
-git clone https://github.com/<you>/volmemlyzer.git
-cd volmemlyzer
+git clone https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool.git
+cd VolMemLyzer3-CLI_forensic_tool
 pip install -e .
 # or, without packaging:
 pip install -r requirements.txt
