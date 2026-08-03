@@ -14,7 +14,9 @@ VolMemLyzer is a memory-forensics toolkit built around Volatility 3. It provides
 - Analyze system context, processes, possible code injection, network activity, and persistence indicators.
 - Process a single memory image or a directory of images.
 
-The complete feature schema is documented in [FEATURES.md](FEATURES.md).
+The complete feature schema is documented in [FEATURES.md](FEATURES.md). 
+
+![VolMemLyzer-v3 CLI Help Page (Published to PyPI : `https://pypi.org/project/volmemlyzer/`)](examples/VolMemLyzer.png)
 
 ## Requirements
 
