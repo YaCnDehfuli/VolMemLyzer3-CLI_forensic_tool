@@ -1,6 +1,6 @@
 # VolMemLyzer Feature Catalog (Semantic)
 
-As requested, this catalog **describes each feature by its** and *intended nature* such as: type, domain, unit, aggregation, and a heuristic interpretation. Use this as documentation—not as statistics about any particular run.
+This catalog documents each extracted feature’s type, domain, unit, aggregation method, and intended interpretation. It describes the feature schema; it does not report statistics for a particular memory image.
 
 ---
 
