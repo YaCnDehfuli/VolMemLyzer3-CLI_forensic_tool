@@ -1,10 +1,9 @@
 from __future__ import annotations
 import logging, os, subprocess
 import importlib, time, sys, re
-from typing import Optional, List
+from typing import Optional, List, Union
 from pathlib import Path
 from shutil import which
-from typing import List, Optional
 
 from .core import PluginSpec, PluginRunResult
 from .utilities import renderer_to_ext
@@ -15,20 +14,55 @@ class VolRunner:
     def __init__(self, vol_path: Optional[str] = None, 
                  python_path: Optional[str] = None,
                  default_timeout_s: Optional[int] = None,
-                 default_renderer: str = "json"):
+                 default_renderer: str = "json",
+                 symbol_dirs: Optional[Union[str, List[str]]] = None,
+                 offline: bool = False,
+                 extra_args: Optional[List[str]] = None):
         self._vol_hint = vol_path
         self.vol_path = self._vol_cmd()
         self.default_renderer = default_renderer
         self.default_timeout_s = default_timeout_s
+        self.symbol_dirs = self._normalize_symbol_dirs(symbol_dirs)
+        self.offline = offline
+        self.extra_args = list(extra_args or [])
         self.version = None
+
+    @staticmethod
+    def _normalize_symbol_dirs(symbol_dirs: Optional[Union[str, List[str]]]) -> List[str]:
+        """Accept a list, or the semicolon/colon separated forms vol itself takes."""
+        if not symbol_dirs:
+            return []
+        if isinstance(symbol_dirs, str):
+            parts = [p for chunk in symbol_dirs.split(";") for p in chunk.split(os.pathsep)]
+        else:
+            parts = list(symbol_dirs)
+        return [os.path.abspath(os.path.expanduser(p)) for p in parts if p]
+
+    def global_args(self) -> List[str]:
+        """Volatility options that must precede the plugin name.
+
+        ``--symbol-dirs`` is what makes an air-gapped run possible: Volatility
+        otherwise reaches out to msdl.microsoft.com for the kernel PDB, and every
+        windows.* plugin fails with an unsatisfied
+        ``plugins.<Plugin>.kernel.symbol_table_name`` requirement when it cannot.
+        ``--offline`` additionally stops it from spending the timeout trying.
+        """
+        args: List[str] = []
+        if self.symbol_dirs:
+            args += ["-s", ";".join(self.symbol_dirs)]
+        if self.offline:
+            args.append("--offline")
+        args += self.extra_args
+        return args
 
 
     def _vol_cmd(self) -> str:
         return self.resolve_volatility_command(self._vol_hint)
     
     def build_command(self, image_path: str, renderer: str, plugin: str) -> List[str]:
-        vol = self.resolve_volatility_command(self._vol_hint)  
-        return vol + ["-f", image_path, f"-r={renderer}", plugin]
+        vol = self.resolve_volatility_command(self._vol_hint)
+        # Every option here is global and must come before the plugin name.
+        return vol + self.global_args() + ["-f", image_path, f"-r={renderer}", plugin]
 
     def run_plugin(self, memory_dump_path: str, plugin_specs: PluginSpec,
                     *, renderer: Optional[str] = None, output_dir: Optional[str] = None) -> PluginRunResult:
@@ -38,7 +72,7 @@ class VolRunner:
         ext = renderer_to_ext(renderer)
         outdir = output_dir or self._default_outdir(memory_dump_path)
         os.makedirs(outdir, exist_ok=True)
-        img_name = memory_dump_path.split("\\")[-1]
+        img_name = os.path.basename(memory_dump_path)
         out_path = os.path.join(outdir, f"{img_name}_{plugin_specs.name}.{ext}")
 
         err_path = out_path + ".stderr.txt"
@@ -78,9 +112,32 @@ class VolRunner:
             err_path = None
 
         runtime = time.perf_counter() - t0
+        if rc != 0:
+            # The output file was opened before vol ran, so a failure leaves a
+            # zero-byte JSON behind. Say so here rather than letting a downstream
+            # parser discover it as a confusing "Expected object or value".
+            logger.error("Plugin %s failed (rc=%s). %s", plugin_specs.name, rc,
+                         self._explain_failure(stderr_text, err_path))
         logger.info("Finished %s rc=%s in %.2fs", plugin_specs.name, rc, runtime)
         return PluginRunResult(rc=rc, runtime_s=runtime, output_path=out_path, stderr_path=err_path,
                             meta={"cmd": cmd, "renderer": renderer})
+
+    @staticmethod
+    def _explain_failure(stderr_text: str, err_path: Optional[str]) -> str:
+        """Turn Volatility's stderr into one actionable line."""
+        text = stderr_text or ""
+        if "symbol_table_name" in text or "Symbol file could not be downloaded" in text:
+            return ("Volatility could not resolve the kernel symbol table. It tried to "
+                    "download the PDB from the Microsoft symbol server; if this host has "
+                    "no outbound access, pre-fetch the symbols on a networked machine and "
+                    "pass their directory as symbol_dirs (vol -s).")
+        if "Unable to validate the plugin requirements" in text:
+            return "Volatility rejected the plugin's requirements for this image."
+        if text.startswith("TIMEOUT") or "TIMEOUT after" in text:
+            return "The plugin exceeded its timeout."
+        if err_path:
+            return f"See {err_path} for Volatility's output."
+        return "No stderr was captured."
 
     def list_plugins(self) -> List[str]:
         """Parse vol.py -h output to get available plugins (best-effort)."""

@@ -74,9 +74,13 @@ def _default_artifacts_dir(pipe: Pipeline, image_path: str) -> str:
     os.makedirs(out, exist_ok=True)
     return out
 
-def _init_pipeline(vol_path: str, default_renderer: str, timeout: Optional[int]) -> Pipeline:
-    log.info("Init: vol.py=%s renderer=%s timeout=%s", vol_path, default_renderer, timeout)
-    runner = VolRunner(vol_path=vol_path, default_timeout_s=timeout, default_renderer=default_renderer)
+def _init_pipeline(vol_path: str, default_renderer: str, timeout: Optional[int],
+                   symbol_dirs: Optional[str] = None, offline: bool = False) -> Pipeline:
+    log.info("Init: vol.py=%s renderer=%s timeout=%s symbols=%s offline=%s",
+             vol_path, default_renderer, timeout, symbol_dirs, offline)
+    runner = VolRunner(vol_path=vol_path, default_timeout_s=timeout,
+                       default_renderer=default_renderer,
+                       symbol_dirs=symbol_dirs, offline=offline)
     registry: ExtractorRegistry = build_registry() if build_registry else ExtractorRegistry()
     return Pipeline(runner, registry)
 
@@ -97,6 +101,10 @@ def _wait_with_tqdm(label: str, fn, *args, **kwargs):
     return res
 
 # ------------------------ CLI parser ------------------------
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="Volmemlyzer",
@@ -115,6 +123,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default=os.getenv("VMY_LOG", "INFO"),
                    choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
                    help="Set logging level for CLI and internals")
+    p.add_argument("--symbol-dirs", default=os.getenv("VMY_SYMBOL_DIRS", None),
+                   help=("Semicolon-separated directories of pre-fetched Volatility symbols "
+                         "(passed through as `vol -s`). Required on hosts with no outbound "
+                         "access: without a resolvable kernel symbol table every windows.* "
+                         "plugin fails"))
+    p.add_argument("--offline", action="store_true", default=_env_flag("VMY_OFFLINE"),
+                   help="Never contact the Microsoft symbol server; fail fast instead of "
+                        "spending the timeout on a download that cannot succeed")
     p.add_argument("--set-vol", default=None, help= "Set the volatility path for the runtime")
     sub = p.add_subparsers(dest="mode", required=True)
 
@@ -303,7 +319,7 @@ def handle_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
             parser.error(f"Cannot set the enabled plugins and drop plugins simultaneously. Use either --plugins ... or --drop ...")
         
         if intended or dropped:
-            pipe_tmp = _init_pipeline(args.vol_path, "json", args.timeout)
+            pipe_tmp = _init_pipeline(args.vol_path, "json", args.timeout, args.symbol_dirs, args.offline)
             known = set(pipe_tmp.registry.names())
             try:
                 known |= set(pipe_tmp.runner.list_plugins())
@@ -328,7 +344,7 @@ def handle_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 # ------------------------ handlers ------------------------
 
 def handle_analysis(args) -> int:
-    pipe = _init_pipeline(args.vol_path, args.renderer, args.timeout)
+    pipe = _init_pipeline(args.vol_path, args.renderer, args.timeout, args.symbol_dirs, args.offline)
     outdir = args.outdir or _default_artifacts_dir(pipe, args.image)
     steps = _steps_from_arg(args.steps)
     analysis_dir = os.path.join(outdir, "analysis")
@@ -353,7 +369,7 @@ def handle_analysis(args) -> int:
     return 0
 
 def handle_run(args) -> int:
-    pipe = _init_pipeline(args.vol_path, args.renderer, args.timeout)
+    pipe = _init_pipeline(args.vol_path, args.renderer, args.timeout, args.symbol_dirs, args.offline)
     outdir = args.outdir or _default_artifacts_dir(pipe, args.image)
     enable = _parse_plugins(args.plugins)
     drop = _parse_plugins(args.drop) or None
@@ -383,7 +399,7 @@ def handle_run(args) -> int:
 
 
 def handle_features(args) -> int:
-    pipe = _init_pipeline(args.vol_path, "json", args.timeout)
+    pipe = _init_pipeline(args.vol_path, "json", args.timeout, args.symbol_dirs, args.offline)
     outdir = args.outdir or _default_artifacts_dir(pipe, args.image)
     feature_dir = os.path.join(outdir, "features")
     if not os.path.exists(feature_dir):
@@ -434,7 +450,7 @@ def handle_features(args) -> int:
     return 0
 
 def handle_list(args) -> int:
-    pipe = _init_pipeline(args.vol_path, "json", args.timeout)
+    pipe = _init_pipeline(args.vol_path, "json", args.timeout, args.symbol_dirs, args.offline)
 
     want_vol = args.vol or (not args.vol and not args.registry)
     want_reg = args.registry or (not args.vol and not args.registry)
