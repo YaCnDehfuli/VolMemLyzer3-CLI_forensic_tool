@@ -193,11 +193,25 @@ class VolRunner:
             found = which(name)
             if found:
                 return [found] if not found.endswith(".py") else [sys.executable, found]
+        # pip installs the `vol` console script beside the interpreter running us.
+        # Look there before anything else volatility3-related: inside a venv whose
+        # bin/ is not on PATH (a very common way to invoke this as a library) it is
+        # the only reliable handle on the CLI.
+        bindir = Path(sys.executable).parent
+        for name in ("vol", "vol.exe", "vol.py"):
+            candidate = bindir / name
+            if candidate.exists():
+                return ([sys.executable, str(candidate)] if candidate.suffix == ".py"
+                        else [str(candidate)])
+
         if importlib.util.find_spec("volatility3") is not None:
-            return [sys.executable, "-m", "volatility3"]
+            # `python -m volatility3` does NOT work: the package has no __main__,
+            # and neither does volatility3.cli. Invoking its entry point directly
+            # is the only module-based route that actually runs.
+            return [sys.executable, "-c",
+                    "import sys; from volatility3.cli import main; sys.exit(main())"]
 
         home = Path.home()
-        print("home" + str(home))
         quick = [
             Path.cwd() / "volatility3" / "vol.py",
             Path.cwd() / "Tools" / "volatility3" / "vol.py",
@@ -206,7 +220,6 @@ class VolRunner:
             home / "Tools" / "volatility3" / "vol.py",
             home / "tools" / "volatility3" / "vol.py",
         ]
-        print(quick)
         for c in quick:
             if c.exists():
                 return [sys.executable, str(c)]

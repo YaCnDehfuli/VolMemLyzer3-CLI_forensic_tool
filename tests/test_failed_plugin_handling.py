@@ -255,3 +255,55 @@ def test_a_healthy_run_reports_no_failures(tmp_path):
                                     artifacts_dir=str(tmp_path / "artifacts"),
                                     use_cache=False)
     assert row.failed_plugins == {}
+
+
+# --------------------------------------------------------------------------
+# locating the vol CLI
+# --------------------------------------------------------------------------
+
+def test_vol_is_found_beside_the_interpreter_without_PATH(tmp_path, monkeypatch):
+    """A venv whose bin/ is not on PATH is the normal case when this is used as
+    a library, and it used to fall through to an invocation that cannot work."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "python").write_text("")
+    vol = bindir / "vol"
+    vol.write_text("#!/bin/sh\nexit 0\n")
+    vol.chmod(0o755)
+
+    monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("VOL_PATH", raising=False)
+
+    assert VolRunner().resolve_volatility_command() == [str(vol)]
+
+
+def test_module_fallback_uses_a_runnable_entry_point(tmp_path, monkeypatch):
+    """`python -m volatility3` raises "cannot be directly executed" - the package
+    has no __main__, and neither does volatility3.cli."""
+    empty = tmp_path / "bin"
+    empty.mkdir()
+    (empty / "python").write_text("")
+    monkeypatch.setattr(sys, "executable", str(empty / "python"))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("VOL_PATH", raising=False)
+
+    cmd = VolRunner().resolve_volatility_command()
+    assert "-m" not in cmd, "the -m form is not executable for volatility3"
+    if "-c" in cmd:
+        assert "from volatility3.cli import main" in cmd[cmd.index("-c") + 1]
+
+
+def test_resolver_does_not_print_to_stdout(tmp_path, monkeypatch, capsys):
+    """A library writing to stdout corrupts any caller parsing it."""
+    empty = tmp_path / "bin"
+    empty.mkdir()
+    (empty / "python").write_text("")
+    monkeypatch.setattr(sys, "executable", str(empty / "python"))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("VOL_PATH", raising=False)
+    try:
+        VolRunner().resolve_volatility_command()
+    except Exception:
+        pass
+    assert capsys.readouterr().out == ""
