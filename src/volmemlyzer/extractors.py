@@ -11,16 +11,54 @@ from .utilities import *
 logger = logging.getLogger(__name__)
 
 #############################
+def _usable_json(json_path) -> tuple[bool, str]:
+    """Is this path something an extractor can actually parse?
+
+    Every extractor opens its input with ``pd.read_json`` before it can reach its
+    own ``if df.empty`` guard, so an absent or zero-byte file — which is exactly
+    what a failed plugin leaves behind, since the output file is created before
+    Volatility is launched — surfaces as ``ValueError: Expected object or value``
+    with a full traceback. Checking here fixes that once for every extractor
+    instead of once per extractor.
+    """
+    if not json_path:
+        return False, "no output path was produced"
+    if not os.path.exists(json_path):
+        return False, "the plugin produced no output file"
+    try:
+        if os.path.getsize(json_path) == 0:
+            return False, "the plugin produced an empty file (it most likely failed)"
+        with open(json_path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096).lstrip()
+    except OSError as exc:
+        return False, f"the output file could not be read ({type(exc).__name__})"
+    if not head:
+        return False, "the plugin produced a blank file (it most likely failed)"
+    if head[0] not in "[{":
+        snippet = " ".join(head.split())[:120]
+        return False, f"the output is not JSON (starts with: {snippet!r})"
+    return True, ""
+
+
 def _legacy_adapter(fn):
     """
     Wrap legacy extractor functions so they all:
       • take (json_path, *, context)
       • emit logging around execution
+      • skip cleanly when the plugin produced nothing to parse
       • normalize return into ExtractResult(features, context, metrics)
     """
     def wrapped(json_path: str, *, context):
         t0 = time.perf_counter()
         logger.debug("Extractor %s starting (json=%s)", fn.__name__, json_path)
+
+        ok, reason = _usable_json(json_path)
+        if not ok:
+            # A missing feature is expected and recoverable; a stack trace here
+            # reads like a crash and buries the plugin failure that caused it.
+            logger.warning("Extractor %s skipped: %s (%s)", fn.__name__, reason, json_path)
+            return ExtractResult(features={}, context=None,
+                                 metrics={"skipped": reason, "duration_s": 0.0})
         try:
             result = fn(json_path, **context)  # legacy kwargs become context
             dur = time.perf_counter() - t0

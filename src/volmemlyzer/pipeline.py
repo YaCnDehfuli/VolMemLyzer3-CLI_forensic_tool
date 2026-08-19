@@ -15,6 +15,12 @@ class Pipeline:
     def __init__(self, runner: VolRunner, registry: ExtractorRegistry):
         self.runner = runner
         self.registry = registry
+        # name -> why it failed, for the most recent run on this Pipeline.
+        self._failed_plugins: Dict[str, str] = {}
+
+    @property
+    def failed_plugins(self) -> Dict[str, str]:
+        return dict(self._failed_plugins)
 
     # ---------- Public API ----------
 
@@ -35,9 +41,10 @@ class Pipeline:
         outdir = outdir or self._default_artifacts_dir(image_path)
         os.makedirs(outdir, exist_ok=True)
         artifact_map: Dict[str, str] = {}
+        self._failed_plugins = {}
 
         want_ext = renderer_to_ext(renderer)
-        img_name = image_path.split("\\")[-1]
+        img_name = os.path.basename(image_path)
 
         def _run_one(name: str) -> tuple[str, str]:
             spec, _ = self.registry.get(name)
@@ -60,6 +67,8 @@ class Pipeline:
             run = self.runner.run_plugin(image_path, spec, renderer=renderer, output_dir=outdir)
             # VolRunner returns PluginRunResult; prefer its output path if present
             out_path = getattr(run, "output_path", os.path.join(outdir, f"{spec.name}.{want_ext}"))
+            if getattr(run, "rc", 0) != 0:
+                self._note_failure(spec.name, run)
             return name, out_path
 
         # topo-order, per-layer concurrency
@@ -77,7 +86,9 @@ class Pipeline:
                     k, p = _run_one(n)
                     artifact_map[k] = p
 
-        return ActionResult(artifacts={"raw_dir": outdir, "plugins": artifact_map})
+        self._warn_if_widely_failed(len(selected))
+        return ActionResult(artifacts={"raw_dir": outdir, "plugins": artifact_map,
+                                       "failed_plugins": self.failed_plugins})
 
     def run_extract_features(
         self,
@@ -96,6 +107,7 @@ class Pipeline:
 
         features: Dict[str, Any] = {}
         context_map: Dict[str, Any] = {}
+        self._failed_plugins = {}
 
         def _task(name: str):
             spec, extractor = self.registry.get(name)
@@ -126,13 +138,30 @@ class Pipeline:
                         context_map[k] = extr.context
                     features.update(extr.features or {})
 
+        self._warn_if_widely_failed(len(selected))
         row = FeatureRow(
             image_name=os.path.basename(image_path),
             features={k: to_builtin(v) for k, v in features.items()},
             image_hash=cheap_image_hash(image_path),
             vol_version=self.runner.get_version(),
+            failed_plugins=self.failed_plugins,
         )
         return row
+
+    def _warn_if_widely_failed(self, attempted: int) -> None:
+        """A handful of failures is normal; nearly all of them means one cause."""
+        failed = len(self._failed_plugins)
+        if not failed:
+            return
+        logger.warning("%d of %d plugins produced no usable output: %s",
+                       failed, attempted, ", ".join(sorted(self._failed_plugins)))
+        if attempted and failed >= max(3, int(attempted * 0.5)):
+            logger.error(
+                "Most plugins failed, which usually means one shared cause rather than "
+                "%d separate ones - most often an unresolvable kernel symbol table. "
+                "Check a .stderr.txt file next to the artifacts; if it mentions the "
+                "Microsoft symbol server, supply pre-fetched symbols via symbol_dirs.",
+                failed)
 
 
     def run_analysis_steps(
@@ -171,7 +200,7 @@ class Pipeline:
         3) Else, run the plugin with the requested renderer and return the new path.
         """
         want_ext = renderer_to_ext(target_renderer)
-        img_name = image_path.split("\\")[-1]
+        img_name = os.path.basename(image_path)
         base = os.path.join(artifacts_dir, f"{img_name}_{spec.name}")
 
         # 1) exact format hit
@@ -183,7 +212,18 @@ class Pipeline:
 
         # 3) no cache or not convertible -> run once with desired renderer
         run = self.runner.run_plugin(image_path, spec, renderer=target_renderer, output_dir=artifacts_dir)
-        return getattr(run, "output_path", f"{base}.{want_ext}")
+        path = getattr(run, "output_path", f"{base}.{want_ext}")
+        if getattr(run, "rc", 0) != 0:
+            self._note_failure(spec.name, run)
+        return path
+
+    def _note_failure(self, name: str, run) -> None:
+        """Record a plugin that exited non-zero, with a pointer to its stderr."""
+        detail = f"vol exited {getattr(run, 'rc', '?')}"
+        stderr_path = getattr(run, "stderr_path", None)
+        if stderr_path:
+            detail += f"; see {stderr_path}"
+        self._failed_plugins[name] = detail
 
 
     # ---------- Cache validation (single source of truth) ----------

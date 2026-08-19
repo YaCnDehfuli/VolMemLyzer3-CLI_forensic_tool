@@ -23,6 +23,11 @@ class PluginRunResult:
     stderr_path: Optional[str] = None
     meta: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def ok(self) -> bool:
+        """vol exited cleanly. A non-zero rc leaves an empty output file behind."""
+        return self.rc == 0
+
 @dataclass
 class ExtractResult:
     """Uniform extractor output."""
@@ -39,6 +44,10 @@ class FeatureRow:
     dump_time: Optional[str] = None
     vol_version: Optional[str] = None
     run_id: Optional[str] = None
+    # Plugins that did not produce usable output, mapped to why. Without this a
+    # caller cannot tell "this image genuinely has no such artifacts" from
+    # "Volatility could not run", because both arrive as absent features.
+    failed_plugins: Dict[str, str] = field(default_factory=dict)
 
 # ---------- Higher-level analysis artifacts ----------
 

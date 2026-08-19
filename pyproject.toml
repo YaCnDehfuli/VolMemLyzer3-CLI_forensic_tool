@@ -46,3 +46,6 @@ include = ["volmemlyzer", "volmemlyzer.*"]
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
