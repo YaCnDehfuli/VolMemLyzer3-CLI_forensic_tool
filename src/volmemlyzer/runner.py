@@ -108,7 +108,7 @@ class VolRunner:
             if not self.version:
                 self.version = self._parse_version(stderr_text)
             with open(err_path, "w", encoding="utf-8") as ef:
-                ef.write(stderr_text)
+                ef.write(self._condense_stderr(stderr_text))
         else:
             err_path = None
 
@@ -122,6 +122,36 @@ class VolRunner:
         logger.info("Finished %s rc=%s in %.2fs", plugin_specs.name, rc, runtime)
         return PluginRunResult(rc=rc, runtime_s=runtime, output_path=out_path, stderr_path=err_path,
                             meta={"cmd": cmd, "renderer": renderer})
+
+    @staticmethod
+    def _condense_stderr(text: str) -> str:
+        """Keep the diagnostics, drop the progress animation.
+
+        Volatility redraws a "Progress: NN.NN <phase>" line on stderr thousands of
+        times a second, each terminated with a carriage return so a terminal
+        overwrites it in place. Written to a file none of that is overwritten, and
+        a single plugin on a large image leaves a 10 MB .stderr.txt that is almost
+        entirely one repeated line. Keeping the last update per phase preserves
+        how far the plugin actually got without the flipbook.
+        """
+        kept: List[str] = []
+        last_phase = None
+        for chunk in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = chunk.rstrip()
+            if not line:
+                continue
+            if line.startswith("Progress:"):
+                # "Progress:   12.34\t\tScanning primary2" -> phase is the tail.
+                phase = line.split("\t")[-1].strip()
+                if phase == last_phase:
+                    kept[-1] = line          # same phase, newer percentage
+                else:
+                    kept.append(line)
+                    last_phase = phase
+                continue
+            last_phase = None
+            kept.append(line)
+        return "\n".join(kept) + "\n"
 
     @staticmethod
     def _explain_failure(stderr_text: str, err_path: Optional[str]) -> str:

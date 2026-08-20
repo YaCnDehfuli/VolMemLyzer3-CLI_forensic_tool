@@ -773,6 +773,22 @@ class OverviewAnalysis:
         if self._peb_access(data):
             score += 4; flags.append("PEB")
             why.append("Direct PEB/TEB access, typical of position-independent code")
+        if self._peb_walk(data):
+            score += 6; flags.append("LDRWALK")
+            why.append("Walks the PEB loader lists, the way code with no import table finds its imports")
+        # Volatility only hands us the first 64 bytes of the region, so two of
+        # these rarely fit in the window even when the code is full of them. One
+        # is weak on its own and scored as corroboration rather than a finding.
+        hashes = self._api_hashing(data)
+        if hashes >= 2:
+            score += 6; flags.append("APIHASH")
+            why.append("Repeated push of hash-like constants, typical of resolving imports by hash")
+        elif hashes == 1:
+            score += 2; flags.append("APIHASH?")
+            why.append("Pushes a hash-like constant")
+        if self._segment_tricks(data):
+            score += 4; flags.append("SEG")
+            why.append("Segment register manipulation (push fs / pop ds)")
 
         # Context, never enough on its own.
         if commit is not None and commit > 32:
@@ -806,6 +822,49 @@ class OverviewAnalysis:
             return bytes.fromhex(re.sub(r"[\s]", "", cleaned))
         except ValueError:
             return b""
+
+    # The x86 walk from the PEB to the loader's module lists. Position-independent
+    # code has to find its own imports, and this is how it does it:
+    #   mov eax,[eax+0x0c]   PEB->Ldr
+    #   mov esi,[eax+0x1c]   InInitializationOrderModuleList
+    #   mov eax,[esi+0x08]   DllBase
+    #   mov edi,[esi+0x20]   BaseDllName
+    #   mov esi,[esi]        next entry
+    # Compiler output reaches structure fields the same way in general, so one of
+    # these on its own means nothing; several together is the walk.
+    _PEB_WALK_OPS = (
+        b"\x8b\x40\x0c", b"\x8b\x70\x1c", b"\x8b\x46\x08",
+        b"\x8b\x7e\x20", b"\x8b\x36", b"\x8b\x5e\x08", b"\x8b\x4e\x20",
+    )
+
+    @classmethod
+    def _peb_walk(cls, data: bytes) -> bool:
+        return sum(1 for op in cls._PEB_WALK_OPS if op in data) >= 2
+
+    @staticmethod
+    def _api_hashing(data: bytes) -> int:
+        """Repeated `push <32-bit constant>` where the constants look like hashes.
+
+        Shellcode resolves imports by hashing the export names and comparing, so
+        the hashes appear inline as immediates. Ordinary code pushes small
+        constants -- addresses, lengths, flags -- which leave most of the four
+        bytes zero, so requiring three distinct non-zero bytes separates them.
+
+        Returns how many were found, since one and several mean different things.
+        """
+        hits = 0
+        for m in re.finditer(rb"\x68(....)", data, re.DOTALL):
+            imm = m.group(1)
+            if len(set(imm)) >= 3 and imm.count(0) <= 1:
+                hits += 1
+        return hits
+
+    @staticmethod
+    def _segment_tricks(data: bytes) -> bool:
+        """push fs / pop ds and friends: reaching for a segment register at all is
+        unusual outside of hand-written code."""
+        return bool(re.search(rb"\x0f\xa0.{0,4}\x1f", data, re.DOTALL)) or \
+               bool(re.search(rb"\x0f\xa8.{0,4}\x1f", data, re.DOTALL))
 
     @staticmethod
     def _shellcode_prologue(data: bytes) -> bool:

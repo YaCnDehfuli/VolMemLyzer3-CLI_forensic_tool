@@ -307,3 +307,44 @@ def test_resolver_does_not_print_to_stdout(tmp_path, monkeypatch, capsys):
     except Exception:
         pass
     assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------
+# stderr capture keeps the diagnostics without the progress animation
+# --------------------------------------------------------------------------
+
+def test_repeated_progress_updates_collapse_to_the_last_one():
+    """Volatility redraws this line thousands of times a second behind a carriage
+    return. Written to a file, nothing overwrites anything: one plugin on a large
+    image left a 10 MB .stderr.txt that was almost entirely one repeated line."""
+    raw = "Volatility 3 Framework 2.28.0\n" + "".join(
+        f"\rProgress: {i / 100:7.2f}\t\tScanning memory_layer" for i in range(5000))
+    out = VolRunner._condense_stderr(raw)
+    assert out.count("Scanning memory_layer") == 1
+    assert "Progress:   49.99\t\tScanning memory_layer" in out
+    assert "Volatility 3 Framework 2.28.0" in out
+    assert len(out) < len(raw) / 100
+
+
+def test_each_phase_keeps_its_own_last_update():
+    raw = ("\rProgress:  10.00\t\tPhase one"
+           "\rProgress:  90.00\t\tPhase one"
+           "\rProgress:  20.00\t\tPhase two"
+           "\rProgress: 100.00\t\tPhase two")
+    out = VolRunner._condense_stderr(raw).strip().splitlines()
+    assert out == ["Progress:  90.00\t\tPhase one", "Progress: 100.00\t\tPhase two"]
+
+
+def test_real_diagnostics_are_never_dropped():
+    raw = ("\rProgress:  50.00\t\tScanning\n"
+           "Unsatisfied requirement plugins.PsList.kernel.symbol_table_name\n"
+           "Traceback (most recent call last):\n  File \"x\", line 1\n")
+    out = VolRunner._condense_stderr(raw)
+    for line in ("Unsatisfied requirement", "Traceback", 'File "x", line 1'):
+        assert line in out
+
+
+def test_a_failure_explanation_still_works_on_condensed_output():
+    raw = "\rProgress: 100.00\t\tPDB scanning finished\nSymbol file could not be downloaded\n"
+    condensed = VolRunner._condense_stderr(raw)
+    assert "symbol" in VolRunner._explain_failure(condensed, None).lower()
