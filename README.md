@@ -116,6 +116,20 @@ before any step interprets its output, so the steps overlap instead of queueing.
 
 Use `--no-cache` to force fresh plugin runs. Supported step aliases include `bearings`, `processes`, `injections`, `network`, `persistence`, `kernel`, and `report`.
 
+### Reading the risk column
+
+Every step scores findings on one ladder — Low, Medium (9), High (14), Critical
+(20) — and only tables a row once it reaches Medium. `--min-risk` raises that
+floor (`--high-level` is the same thing as `--min-risk high`).
+
+**These bands surface signal for review. They are not detections.** A Critical
+row means several unusual things line up on one object, not that it is
+malicious; plenty of legitimate software will land in the table, and a quiet
+table is not a clean machine. Thresholds live in
+`OverviewAnalysis.SURFACE_THRESHOLDS` and the path lists in
+`utilities.SUSPICIOUS_DIRS` / `USER_INSTALL_SUBDIRS`, so tuning for your estate
+is a data edit rather than a code change.
+
 `--deep` adds the slow cross-check plugins to the process census. Today that is
 `psxview`, which re-runs `psscan`, `thrdscan` and a csrss handle sweep internally
 and will dominate the run on a large image; the census itself comes from

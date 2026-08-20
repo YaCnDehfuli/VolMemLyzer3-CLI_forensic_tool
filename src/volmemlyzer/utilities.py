@@ -477,29 +477,60 @@ def canonical_path_key(raw: str) -> str:
 
 
 
+# Matches the "C:\Users\<someone>\" prefix so the rest of the path can be tested.
+_USER_PROFILE_RE = re.compile(r"^[a-z]:\\users\\[^\\]+\\")
+
+# Per-user locations where ordinary software genuinely installs itself. Anything
+# under here is not interesting on its own; plenty of well-known applications ship
+# to AppData by design and flagging the lot buries the rows that matter.
+USER_INSTALL_SUBDIRS = (
+    "appdata\\local\\programs\\",
+    "appdata\\local\\microsoft\\",
+    "appdata\\local\\google\\",
+    "appdata\\local\\discord\\",
+    "appdata\\local\\slack\\",
+    "appdata\\local\\postman\\",
+    "appdata\\local\\jetbrains\\",
+)
+
+# Directories that are user-writable and are not where installed software lives.
+# This is the tuning surface for path-based scoring: widen it to surface more,
+# narrow it to surface less.
+SUSPICIOUS_DIRS = (
+    "\\temp\\",
+    "\\tmp\\",
+    "\\downloads\\",
+    "\\desktop\\",
+    "\\users\\public\\",
+    "\\$recycle.bin\\",
+    "\\perflogs\\",
+    "\\appdata\\roaming\\",
+    "\\appdata\\local\\temp\\",
+)
+
+
 def is_suspicious_path(path: str) -> bool:
+    """Is this path user-writable and not somewhere software normally installs?
+
+    Note the previous implementation sliced with ``path_l[len(user_dir_regex):]``,
+    taking the *length of the regex source* as an offset into the path, so the
+    per-user allow-list never matched anything it was meant to. Everything then
+    fell through to a list containing a bare "\\appdata\\", which flagged every
+    process belonging to any application installed under AppData.
     """
-    Check if the path is suspicious. A path is suspicious if it is user-writable 
-    and doesn't belong to legitimate system or common application directories.
-    """
+    if not path:
+        return False
+
     path_l = path.replace("/", "\\").lower()
-     
-    user_dir_regex = r"c:\\users\\[^\\]+\\"
-    user_paths = [
-        "c:\\users\\",  # All user directories
-        "c:\\users\\public\\",  # Public user directory
-        "c:\\users\\appdata\\local\\programs\\",  # Common app installation paths
-        "c:\\users\\appdata\\local\\microsoft\\",]  # Microsoft user app locations
 
     if not not_system_path(path):
         return False
-    
-    if any(re.match(user_dir_regex, path_l) and path_l[len(user_dir_regex):].startswith(subdir.lower()) for subdir in user_paths):
-        return False  
-    
-    else:
-        suspicious_paths = ["\\temp\\", "\\public\\", "\\downloads\\", "\\appdata\\", "\\workspace\\", "\\desktop\\"]
-        return any(s in path_l for s in suspicious_paths)
+
+    m = _USER_PROFILE_RE.match(path_l)
+    if m and path_l[m.end():].startswith(USER_INSTALL_SUBDIRS):
+        return False
+
+    return any(s in path_l for s in SUSPICIOUS_DIRS)
 
 
 def get_depth(children):

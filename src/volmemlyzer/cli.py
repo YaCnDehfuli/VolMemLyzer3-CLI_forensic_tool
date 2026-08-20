@@ -143,8 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("-o", "--outdir", default=None, help="Artifacts directory (defaults near image)")
     a.add_argument("--steps", default=None, help="Comma list of steps (e.g. 0,1,2 or bearings,processes)")
     a.add_argument("--no-cache", action="store_true", help="Ignore cached plugin outputs")
+    a.add_argument("--min-risk", default=None, choices=["low", "medium", "high", "critical"],
+                   help="Lowest risk band to show. These bands surface signal for "
+                        "review; they are not detections")
     a.add_argument("--high-level", action="store_true",
-                   help="Only surface high-risk findings when the analysis supports it")
+                   help="Shorthand for --min-risk high")
     a.add_argument("--deep", action="store_true",
                    help="Add the slow cross-check plugins to the census (psxview). "
                         "psxview re-runs psscan, thrdscan and a csrss handle sweep "
@@ -366,6 +369,7 @@ def handle_analysis(args) -> int:
         high_level=args.high_level,
         concurrency=args.jobs,
         deep=args.deep,
+        min_risk=args.min_risk,
     )
     if args.json:
         img_name = os.path.basename(args.image)
@@ -565,7 +569,7 @@ def show_help() -> None:
         print("VolMemLyzer — Memory forensics over Volatility 3".center(w))
         print("USAGE  volmemlyzer [GLOBAL OPTIONS] <command> [COMMAND OPTIONS]\n")
         print("[GLOBAL] --vol-path PATH | --renderer R | --timeout SEC | -j/--jobs N | --log-level L\n")
-        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --high-level ; --deep ; --json\n")
+        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --min-risk BAND ; --deep ; --json\n")
         print("[run]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --renderer R ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[extract]\n  -i/--image PATH (req,file|dir) ; -o/--outdir DIR ; -f/--format FMT(json|csv, req) ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[list]\n  --vol ; --registry")
@@ -595,7 +599,8 @@ def show_help() -> None:
         "-o, --outdir DIR   artifacts dir\n"
         "--steps LIST       0–6 or aliases\n"
         "--no-cache         fresh runs\n"
-        "--high-level       high-risk only\n"
+        "--min-risk BAND    low|medium|high|critical\n"
+        "--high-level       same as --min-risk high\n"
         "--deep             add psxview (slow)\n"
         "--json             write analysis JSON"
     )
