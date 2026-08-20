@@ -24,10 +24,36 @@ class OverviewAnalysis:
       3) Networking (netscan deep)
       4) Persistence & User Activity (hives, run keys, tasks, userassist)
     """
-    # Plugin-specific surfacing BASELINE_SCORES
-    BASELINE_SCORES = {'scheduled_tasks': 3, 'userassist': 2, 'netscan': 4, 'malfind' : 4, "process" : 4}
+    # One ladder, used everywhere. A row's score maps to a band, and a row is only
+    # tabled when it clears its surface threshold.
+    #
+    # These surface signal for an analyst to look at. They are not detections and
+    # carry no notion of malicious; a Critical row means "several things about this
+    # are unusual at once", not "this is malware".
+    RISK_BANDS = (("Critical", 20), ("High", 14), ("Medium", 9), ("Low", 0))
 
-    def __init__(self):
+    # Lowest band a row may occupy and still be shown, by name.
+    MIN_RISK = {"low": 0, "medium": 9, "high": 14, "critical": 20}
+
+    # Score at or above which a finding is worth putting in front of someone.
+    # Every one sits on the Medium floor of the ladder above, so surfacing takes
+    # one major signal or a couple of corroborating minor ones, and a row that is
+    # shown is never labelled below the band it cleared. The previous values -- 3
+    # for scheduled tasks, 2 for userassist, 4 for netscan -- sat below the weight
+    # of a single minor flag, so every task with a logon trigger and every socket
+    # belonging to a busy process was tabled.
+    SURFACE_THRESHOLDS = {
+        "process": 9,
+        "malfind": 9,
+        "netscan": 9,
+        "scheduled_tasks": 9,
+        "userassist": 9,
+    }
+    # Retained so callers that reached into the old name keep working.
+    BASELINE_SCORES = SURFACE_THRESHOLDS
+
+    def __init__(self, min_risk: str = "low"):
+        self._min_risk = (min_risk or "low").lower()
         # name -> artifact path, filled by _prefetch. The steps read from here
         # instead of asking for the plugin again: a plugin that failed leaves an
         # unusable file behind, so a cache lookup would miss and we would run the
@@ -58,9 +84,16 @@ class OverviewAnalysis:
         use_cache: bool = True,
         high_level: bool = False,
         concurrency: int = 1,
-        deep: bool = False
+        deep: bool = False,
+        min_risk: Optional[str] = None
     ) -> Dict[str, Any]:
+        # --high-level was always "only show me the strong signals", which is the
+        # same knob as --min-risk high; keep both spellings, prefer the explicit one.
+        self._min_risk = (min_risk or ("high" if high_level else self._min_risk)).lower()
         TerminalUI.banner("FORENSIC OVERVIEW – STEPWISE")
+        TerminalUI.note("Findings below surface signal for review; they are not detections.")
+        if self._min_risk != "low":
+            TerminalUI.note(f"Showing {self._min_risk} risk and above.")
         artifacts_dir = artifacts_dir or pipe._default_artifacts_dir(image_path)
         results: Dict[str, Any] = {"image": os.path.basename(image_path),
                                    "quick_hash": cheap_image_hash(image_path)}
@@ -158,25 +191,28 @@ class OverviewAnalysis:
         psxview = load_records_any(out_path.get("psxview")) if deep else None
     
         census = self._build_census(pslist, pstree)
-        flags, susp = self._score_processes(census, psscan, psxview)
+        # `summary`, not `flags`: the comprehension below binds a loop variable of
+        # that name, and the returned payload used to carry the last row's flag
+        # string where the summary belonged.
+        summary, susp = self._score_processes(census, psscan, psxview)
 
         TerminalUI.kv([
-            ("pslist processes", flags.get("pslist_count")),
-            ("psscan processes", flags.get("psscan_count")),
-            ("psscan-only (hidden/terminated)", flags.get("hidden_count")),
-            ("orphans (ppid missing)", flags.get("orphans")),
+            ("pslist processes", summary.get("pslist_count")),
+            ("psscan processes", summary.get("psscan_count")),
+            ("psscan-only, no exit time (hidden)", summary.get("hidden_count")),
+            ("psscan-only, exited (ordinary churn)", summary.get("terminated_count")),
+            ("orphans (ppid missing)", summary.get("orphans")),
+            ("processes with a resolved path", summary.get("with_path")),
             # None, not 0: psxview was not run, so this is unknown rather than clean.
-            ("psxview inconsistencies", flags.get("psxview_inconsistent")
-             if flags.get("psxview_inconsistent") is not None else "not checked (use --deep)"),
+            ("psxview inconsistencies", summary.get("psxview_inconsistent")
+             if summary.get("psxview_inconsistent") is not None else "not checked (use --deep)"),
         ])
-        rows = [[str(pid), name or "", str(ppid or ""), str(score), flags, rationale] 
-                    for pid, name, ppid, score, flags, rationale in susp]
-        
-        if high_level:
-            rows = [v for v in rows if (v[3] == 'High' or v[3] == 'Critical')]
+        rows = [[str(pid), name or "", str(ppid or ""), str(risk), flag_str, rationale]
+                for pid, name, ppid, risk, flag_str, rationale in susp]
+        rows = self._keep(rows, 3)
 
         shown = TerminalUI.table(["PID","Name","PPID","Risk","Flags","Rationale"], rows, max_rows=25)
-        return {"summary": flags, "suspicious": [
+        return {"summary": summary, "suspicious": [
             {"pid": int(r[0]), "name": r[1], "ppid": (int(r[2]) if r[2] else None),
              "Risk": str(r[3]), "flags": r[4], "rationale": r[5]} for r in rows[:len(shown)]
         ]}
@@ -195,7 +231,7 @@ class OverviewAnalysis:
         for row in rows:
             score, flags, rationale = self._score_injections(row)
 
-            if score > self.BASELINE_SCORES.get('malfind', 4): 
+            if score >= self._threshold("malfind"):
                 start_vpn = row.get("Start VPN")
                 if start_vpn not in suspicious_regions:
                     suspicious_regions[start_vpn] = {
@@ -234,8 +270,7 @@ class OverviewAnalysis:
         rows_to_display.sort(key=lambda r: (-r[-2], r[0]))
         rows_to_display = [self._score_map(row, -2) for row in rows_to_display]
 
-        if high_level:
-            rows_to_display = [v for v in rows_to_display if (v[-2] == 'High' or v[-2] == 'Critical')]
+        rows_to_display = self._keep(rows_to_display, -2)
 
         TerminalUI.table(["PID", "Process", "CommitCharge", "Start VPN", "Vad Tag" , "Notes" ,"Risk", "Rationale"], rows_to_display, max_rows=25)
         return {"suspicious_injections": list(suspicious_regions.values())}
@@ -297,8 +332,7 @@ class OverviewAnalysis:
             row["_same_remote_count"] = per_remote_pub.get(fip, 0)
 
             score, flags, rationale = self._score_network_connections(row, self._is_private_ip, self._is_loopback)
-            threshold = getattr(self, "BASELINE_SCORES", {}).get("netscan", 12)
-            if score >= threshold:
+            if score >= self._threshold("netscan"):
                 suspicious.append({
                     "local_address": la,
                     "foreign_address": fa,
@@ -320,8 +354,10 @@ class OverviewAnalysis:
 
         rows_to_display = []
         for s in suspicious:
-            risk_score = int(s["score"])
-            risk_label = "High" if risk_score >= 18 else "Medium" if risk_score >= 12 else "Low"
+            # The shared ladder, not a second private one -- this step used to
+            # label with its own bands, so the same score read as a different risk
+            # here than it did in every other step.
+            risk_label = self._risk_from_score(int(s["score"]))
             indicator = self._indicator_from_flags(s.get("flags", []))
             rows_to_display.append([
                 s.get("local_address"),
@@ -336,9 +372,7 @@ class OverviewAnalysis:
                 s.get("rationale"),
             ])
 
-        # emphasize only strong signals in high_level mode
-        if high_level:
-            rows_to_display = [r for r in rows_to_display if (r[7] == "High" or r[7] == "Critical")]
+        rows_to_display = self._keep(rows_to_display, 7)
 
         TerminalUI.table(
             ["Local Address", "Foreign Address", "Local Port", "Foreign Port",
@@ -413,7 +447,7 @@ class OverviewAnalysis:
 
             for t in tasks:
                 s, why = self._score_scheduled_task(t)
-                if s >= self.BASELINE_SCORES.get('scheduled_tasks', 8):
+                if s >= self._threshold("scheduled_tasks"):
                     flagged += 1
                     name = str(t.get("Task Name") or "")
                     act  = str(t.get("Action") or "")
@@ -462,7 +496,7 @@ class OverviewAnalysis:
                     if cnt:  why.append(f"Count={cnt}")
                     if fcnt: why.append(f"Focus={fcnt}")
 
-                if s >= self.BASELINE_SCORES.get('userassist', 6) and self._seems_pathlike(name):
+                if s >= self._threshold("userassist") and self._seems_pathlike(name):
                     flagged += 1
                     key = f"ua:{canonical_path_key(name) or name.strip().lower()}"
                     add_or_update(
@@ -480,9 +514,7 @@ class OverviewAnalysis:
         iocs_sorted = sorted(best.values(), key=lambda d: (-d["score"], d["type"], d["indicator"]))
         rows = [[d["type"], d["indicator"], d["risk"], d["why"], d["source"]] for d in iocs_sorted]
         
-        # emphasize only strong signals in high_level mode
-        if high_level:
-            rows = [r for r in rows if (r[2] == "High" or r[2] == "Critical")]
+        rows = self._keep(rows, 2)
 
         TerminalUI.table(["Type","Indicator","Risk","Rationale","Source"], rows, max_rows=25)
 
@@ -493,10 +525,43 @@ class OverviewAnalysis:
 
     # ------------------------- Scorer functions --------------------------
 
-    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: List[dict], psxview: Optional[List[dict]]) -> Tuple[Dict[str, Any], List[Tuple[int,str,Optional[int],int,str,str]]]:
+    # Binaries whose name alone carries authority, which is exactly why malware
+    # borrows it. Used two ways: a near-miss spelling, and the real name in a
+    # place the real binary never lives.
+    SYSTEM_BINARIES = frozenset({
+        "svchost.exe", "services.exe", "lsass.exe", "csrss.exe", "smss.exe",
+        "wininit.exe", "winlogon.exe", "explorer.exe", "spoolsv.exe", "conhost.exe",
+        "taskhostw.exe", "dllhost.exe", "rundll32.exe", "dwm.exe", "userinit.exe",
+        "lsm.exe", "searchindexer.exe", "runtimebroker.exe", "sihost.exe",
+    })
+
+    # What each of these is actually supposed to start. A child outside the set is
+    # worth a look; a child inside it is the operating system working normally.
+    EXPECTED_CHILDREN = {
+        "smss.exe":     {"csrss.exe", "wininit.exe", "winlogon.exe", "smss.exe"},
+        "wininit.exe":  {"services.exe", "lsass.exe", "lsm.exe", "fontdrvhost.exe"},
+        "winlogon.exe": {"userinit.exe", "dwm.exe", "fontdrvhost.exe", "logonui.exe"},
+        "lsass.exe":    set(),
+    }
+
+    # The four discovery sources psxview cross-checks.
+    PSXVIEW_SOURCES = ("pslist", "psscan", "thrdscan", "csrss")
+
+    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: List[dict], psxview: Optional[List[dict]]) -> Tuple[Dict[str, Any], List[Tuple]]:
         pid_set = set(census.keys())
-        psscan_pids = {self._as_int(r.get("PID") or r.get("pid")) for r in (psscan or [])}
-        psscan_pids.discard(None)
+        # Keep the exit time alongside the PID. A process found by pool scan but
+        # absent from the linked list is usually just one that has exited and not
+        # yet been reaped -- an image has dozens -- so treating every psscan-only
+        # PID as hidden made the strongest signal in this step indistinguishable
+        # from ordinary process churn.
+        psscan_exited: Dict[int, bool] = {}
+        for r in psscan or []:
+            pid = self._as_int(r.get("PID") or r.get("pid"))
+            if pid is None:
+                continue
+            exit_time = r.get("ExitTime") or r.get("Exit Time")
+            psscan_exited[pid] = bool(exit_time) and str(exit_time).strip() not in ("", "N/A")
+        psscan_pids = set(psscan_exited)
 
         # None means psxview was not run at all, which is not the same as psxview
         # having found nothing; the summary must not claim a clean cross-check.
@@ -506,148 +571,261 @@ class OverviewAnalysis:
             pid = self._as_int(r.get("PID") or r.get("Pid") or r.get("pid"))
             if pid is None:
                 continue
-            falses = []
-            for k, v in r.items():
-                if isinstance(v, bool) and v is False and k.upper() not in {"PID","WOW64"}:
-                    falses.append(str(k))
-            if falses:
-                psx_false[pid] = falses
+            # Only the four discovery columns, and only when at least two of them
+            # disagree. Sweeping every boolean column flagged Wow64=False, and a
+            # process that has simply exited is legitimately missing from one
+            # source, so a single False is the normal case rather than a finding.
+            missing = [k for k in self.PSXVIEW_SOURCES if r.get(k) is False]
+            if len(missing) >= 2:
+                psx_false[pid] = missing
 
-        # Build rules (additive, easy to extend)
-        rows: List[List[int,str,Optional[int],int,str,str]] = []
+        rows: List[Tuple] = []
+        emitted: set = set()
+
         for pid in sorted(pid_set | psscan_pids):
-            b = census.get(pid, {"pid": pid, "name": "(not in pslist)", "ppid": None, "path": "", "wow64": None})
-            name = (b.get("name"))
-            wow64 = b.get('wow64')
+            b = census.get(pid) or {"pid": pid, "name": "(not in pslist)", "ppid": None,
+                                    "path": "", "wow64": None}
+            name = (b.get("name") or "").strip()
+            path = (b.get("path") or "").strip()
             ppid = b.get("ppid")
-            path = b.get("path") or ""
-            score = 0; flags: List[str] = []; reasons: List[str] = []
+            wow64 = b.get("wow64")
+            score = 0
+            flags: List[str] = []
+            reasons: List[str] = []
 
+            suspicious_path = bool(path) and is_suspicious_path(path)
+
+            # --- disagreement between discovery methods -----------------------
             if pid in psscan_pids and pid not in pid_set:
-                score += 8; flags.append("HK"); reasons.append("Present in pool scan (psscan) but absent in EPROCESS list (pslist).")
-            if pid in psx_false:
-                score += 8; flags.append("XV"); reasons.append(f"Inconsistency across discovery sources (psxview): {', '.join(psx_false[pid])} = False.")
-            if ppid and ppid not in pid_set:
-                score += 8; flags.append("ZB"); reasons.append("Parent PID not present in census (orphan/zombie).")
-            # Process executable path and name signals
-            if is_suspicious_path(path.lower()):
-                flags.append("OP")
-                reasons.append(f"Executable in suspicious non-system path ({path}).")
-                score += 2 
-
-                if wow64:
-                    flags.append("ww")
-                    reasons.append(f"32bit Executable Running on 64bit Windows from non-system path ({path}).")
-                    score += 4
-                
-                if name and char_entropy(name) > 3.5:  # High entropy (randomized names)
-                    flags.append("OP+ENT")
-                    reasons.append(f"Executable with high entropy name (appears randomized).")
-                    score += 4
-                
-                if name and is_non_ascii(name):  # Non-ASCII names (evasion technique)
-                    if is_suspicious_path(path.lower()):   
-                        flags.append("UNI")
-                        reasons.append(f"Executable with non-ASCII characters in the name.")
-                        score += 4            
-            
-            else:
-                if name and char_entropy(name) > 3.5:  # High entropy (randomized names)
-                    flags.append("ENT")
-                    reasons.append(f"Executable with high entropy name (appears randomized).")
-                    score += 2
-                
-                if name and is_non_ascii(name):  # Non-ASCII names (evasion technique)
-                        flags.append("UNI")
-                        reasons.append(f"Executable with non-ASCII characters in the name.")
-                        score += 2             # if is_suspicious_path(path.lower())
-
-            ppid = census.get(pid, {}).get("ppid")
-            if ppid is not None and ppid not in census:
-                if is_suspicious_path(path):
-                    flags.append("ZB+OP")
-                    reasons.append(f"Orphan process with a suspicious path ({path}).")
-                    score += 6
+                if psscan_exited.get(pid):
+                    score += 2; flags.append("TERM")
+                    reasons.append("Found by pool scan only, but it has an exit time: "
+                                   "a terminated process not yet reaped.")
                 else:
-                    flags.append("ZB")
-                    reasons.append(f"Orphan process.")
-                    score += 4
+                    score += 10; flags.append("HK")
+                    reasons.append("Found by pool scan (psscan) with no exit time, yet absent "
+                                   "from the EPROCESS list (pslist).")
+            if pid in psx_false:
+                score += 8; flags.append("XV")
+                reasons.append(f"Missing from {len(psx_false[pid])} discovery sources (psxview): "
+                               f"{', '.join(psx_false[pid])}.")
 
-            
-            # Parent-child relationship check with broader critical system processes (not just winlogon)
-            parent_name = census.get(ppid, {}).get("name", "").lower() if ppid else ""
-            known_parent_processes = ["lsass.exe", "winlogon.exe", "smss.exe", "wininit.exe"]
-            if parent_name and path:
-                if parent_name in known_parent_processes:
-                    if is_suspicious_path(path):
-                        flags.append("OP+WP")
-                        reasons.append(f"Critical system parent ({parent_name}) with child running from a suspicious path ({path}).")
-                        score += 8
+            # --- parent missing from the census (scored once) -----------------
+            # This used to be scored twice by two rules testing the same condition,
+            # so every orphan carried 12-14 points and a duplicated flag.
+            if ppid is not None and ppid not in pid_set:
+                if suspicious_path:
+                    score += 8; flags.append("ZB+OP")
+                    reasons.append(f"Orphan process running from a user-writable path ({path}).")
+                else:
+                    score += 4; flags.append("ZB")
+                    reasons.append("Parent PID is not present in the census (orphan).")
+
+            # --- where it is running from -------------------------------------
+            if suspicious_path:
+                score += 6; flags.append("OP")
+                reasons.append(f"Executable in a user-writable, non-system path ({path}).")
+                if wow64:
+                    score += 2; flags.append("WOW")
+                    reasons.append("32-bit executable on 64-bit Windows, from that same path.")
+
+            # --- what it is called --------------------------------------------
+            if name:
+                lower = name.lower()
+                if lower in self.SYSTEM_BINARIES and path and not_system_path(path):
+                    score += 8; flags.append("IMP")
+                    reasons.append(f"Carries the name of a system binary but runs from {path}.")
+                twin = self._lookalike_of(lower)
+                if twin:
+                    score += 8; flags.append("LOOK")
+                    reasons.append(f"Name is one character away from the system binary {twin}.")
+                if is_non_ascii(name):
+                    score += 4 if suspicious_path else 2
+                    flags.append("UNI")
+                    reasons.append("Process name contains non-ASCII characters.")
+
+            # --- parentage -----------------------------------------------------
+            parent = (census.get(ppid, {}).get("name") or "").lower() if ppid else ""
+            expected = self.EXPECTED_CHILDREN.get(parent)
+            if expected is not None and name:
+                if name.lower() not in expected:
+                    # The old rule scored +8 whether or not the path was odd, and
+                    # printed the same "suspicious path" rationale either way, so
+                    # services.exe under wininit.exe was flagged on every image.
+                    if suspicious_path:
+                        score += 8; flags.append("WP+OP")
+                        reasons.append(f"Unexpected child of {parent}, running from {path}.")
                     else:
-                        flags.append("WP")
-                        reasons.append(f"Critical system parent ({parent_name}) with child running from a suspicious path ({path}).")
-                        score += 8
-            
-            # Check for processes running from unconventional locations (e.g., development environments)
-            dev_paths = [r"\\workspace\\", r"\\venv\\", r"\\python\\", r"\\dev\\", r"\\git\\", r"\\build\\"]
-            if any(s in path for s in dev_paths):
-                flags.append("DEV")
-                reasons.append(f"Process running from a development environment path ({path}).")
-                rows.append((pid, name, ppid, score, ",".join(flags), " ".join(reasons)))
-                score += 4          
-            
-            if score > 0 and pid and not(any(pid in r for r in rows)):
+                        score += 4; flags.append("WP")
+                        reasons.append(f"Unexpected child of {parent}.")
+
+            if score > 0 and pid is not None and pid not in emitted:
+                emitted.add(pid)
                 rows.append((pid, name, ppid, score, ",".join(flags), " ".join(reasons)))
 
-        flags = {
+        summary = {
             "pslist_count": len(pid_set),
             "psscan_count": len(psscan_pids),
-            "hidden_count": len([1 for pid in psscan_pids if pid not in pid_set]),
-            "orphans": len([1 for pid, b in census.items() if b.get("ppid") and b.get("ppid") not in pid_set]),
+            "hidden_count": len([1 for pid in psscan_pids
+                                 if pid not in pid_set and not psscan_exited.get(pid)]),
+            "terminated_count": len([1 for pid in psscan_pids
+                                     if pid not in pid_set and psscan_exited.get(pid)]),
+            "orphans": len([1 for pid, b in census.items()
+                            if b.get("ppid") is not None and b.get("ppid") not in pid_set]),
             "psxview_inconsistent": len(psx_false) if psxview_ran else None,
+            "with_path": len([1 for b in census.values() if b.get("path")]),
         }
         rows.sort(key=lambda r: (-r[3], r[0]))
+        threshold = self._threshold("process")
+        rows = [r for r in rows if r[3] >= threshold]
         rows = [self._score_map(row, -3) for row in rows]
-        return flags, rows
-    
+        return summary, rows
+
+    @classmethod
+    def _lookalike_of(cls, name: str) -> Optional[str]:
+        """A system binary this name is one edit away from, without being it.
+
+        Catches svch0st.exe and lsasss.exe. Replaces a Shannon-entropy rule that
+        could not work: entropy over a filename is essentially a length proxy, and
+        real Windows binaries sit at the top of the range -- ApplicationFrameHost
+        scores 3.82 and backgroundTaskHost 3.73, above every randomised name we
+        tested, so the old 3.5 bar flagged the operating system and missed the
+        thing it was looking for.
+        """
+        if name in cls.SYSTEM_BINARIES:
+            return None
+        for known in cls.SYSTEM_BINARIES:
+            if abs(len(known) - len(name)) <= 1 and cls._within_one_edit(name, known):
+                return known
+        return None
+
+    @staticmethod
+    def _within_one_edit(a: str, b: str) -> bool:
+        if a == b:
+            return False
+        if len(a) == len(b):
+            diff = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+            if len(diff) == 1:
+                return True
+            # Adjacent transposition: scvhost.exe for svchost.exe.
+            if len(diff) == 2 and diff[1] == diff[0] + 1:
+                i, j = diff
+                return a[i] == b[j] and a[j] == b[i]
+            return False
+        short, long = (a, b) if len(a) < len(b) else (b, a)
+        if len(long) - len(short) != 1:
+            return False
+        i = 0
+        for j, ch in enumerate(long):
+            if i < len(short) and short[i] == ch:
+                i += 1
+            elif j - i:      # a second mismatch
+                return False
+        return True
+
     ###############################################################
 
     def _score_injections(self, row: Dict[str, Any]) -> Tuple[int, str, str]:
-        """
-        Analyze each malfind injection and score it based on both disassembly and hexdump.
+        """Score one malfind region from what the region actually contains.
+
+        Deliberately scored from the bytes rather than the disassembly. Volatility
+        renders the Disasm column with Capstone *if it happens to be installed*,
+        and falls back to a plain byte dump if not -- capstone is an optional
+        extra, not a dependency. Keying off assembly mnemonics therefore made this
+        scorer behave completely differently on two installs of the same tool: it
+        matched nothing at all without capstone, and with capstone the old pattern
+        list (which included a bare `call|jmp`) matched essentially every region,
+        so every row scored the same and the threshold decided nothing.
+
+        The Hexdump column is always present and always the same shape, so that is
+        what we read. Volatility gives us the first 64 bytes of the region.
         """
         score = 0
-        flags = []
-        rationale = []
+        flags: List[str] = []
+        why: List[str] = []
 
-        # Check disassembly for suspicious patterns
-        disasm = row.get("Disasm", "")
-        if self._is_disasm_susp(disasm):
-            score += 8
-            flags.append("DISASM")
-            rationale.append("Suspicious disassembly detected.")
+        data = self._hexdump_bytes(row.get("Hexdump"))
+        prot = str(row.get("Protection") or "").upper()
+        private = self._as_int(row.get("PrivateMemory"))
+        commit = self._as_int(row.get("CommitCharge"))
 
-        # Check hexdump for suspicious byte patterns
-        hexdump = row.get("Hexdump", "")
-        if self._is_hexdump_susp(hexdump):
-            score += 8
-            flags.append("HEXDUMP")
-            rationale.append("Suspicious byte sequence detected in hexdump.")
+        executable = "EXECUTE" in prot
+        writable = "WRITE" in prot  # covers WRITECOPY too
 
-        # Check for private memory regions (memory not backed by a file)
-        if row.get("File output") == "Disabled" and row.get("PrivateMemory") == 1:
-            score += 4
-            flags.append("PRV")
-            rationale.append("Private memory region with no file backing.")
-        
-        # Commit charge analysis: high commit charge can indicate large memory allocation for injection
-        commit_charge = row.get("CommitCharge", 0)
-        if commit_charge > 5:
-            score += 4
-            flags.append("LARGE_COMMIT")
-            rationale.append("High commit charge.")
+        # An unbacked region that is writable and executable at once is the
+        # classic shape of injected code; on its own it is still only a shape.
+        if executable and writable and private == 1:
+            score += 8; flags.append("RWX")
+            why.append(f"Private region that is both writable and executable ({prot or 'unknown'})")
+        elif executable and private == 1:
+            score += 4; flags.append("PRV")
+            why.append("Executable private region with no file backing")
 
-        return score, ", ".join(flags), " | ".join(rationale)
+        if data[:2] == b"MZ":
+            score += 8; flags.append("PE")
+            why.append("PE header at the start of a region that should not hold one")
+        if re.search(rb"\x90{8,}", data):
+            score += 6; flags.append("SLED")
+            why.append("NOP sled of 8 or more bytes")
+        if self._shellcode_prologue(data):
+            score += 6; flags.append("STUB")
+            why.append("Byte sequence matching a known shellcode prologue")
+        if self._peb_access(data):
+            score += 4; flags.append("PEB")
+            why.append("Direct PEB/TEB access, typical of position-independent code")
+
+        # Context, never enough on its own.
+        if commit is not None and commit > 32:
+            score += 2; flags.append("BIGCOMMIT")
+            why.append(f"Large commit charge ({commit})")
+
+        # A region of nothing is not injected code, whatever its protection says.
+        # Volatility reports plenty of these and they were previously scored as if
+        # they held a payload.
+        if data and not data.strip(b"\x00"):
+            return 0, "", "Region is entirely zero bytes"
+
+        return int(score), ", ".join(flags), " | ".join(why) if why else "—"
+
+    @staticmethod
+    def _hexdump_bytes(value) -> bytes:
+        """Volatility's Hexdump column as bytes, tolerating the absent cases.
+
+        In JSON the column is space-separated hex pairs ("4d 5a 90 00"). When the
+        region could not be read Volatility writes the literal string "N/A", and a
+        missing column arrives from pandas as NaN or None. Feeding either of those
+        to bytes.fromhex raises ValueError, which previously escaped
+        step2_injections and took the whole step down with it.
+        """
+        if not isinstance(value, str):
+            return b""
+        cleaned = value.strip()
+        if not cleaned or cleaned.upper() == "N/A":
+            return b""
+        try:
+            return bytes.fromhex(re.sub(r"[\s]", "", cleaned))
+        except ValueError:
+            return b""
+
+    @staticmethod
+    def _shellcode_prologue(data: bytes) -> bool:
+        """Prologues specific enough to be worth a flag on their own."""
+        prologues = (
+            rb"\xfc\xe8[\x00-\xff]{2}\x00\x00",   # metasploit/meterpreter stager
+            rb"\xfc\x48\x83\xe4\xf0\xe8",        # x64 stager (cld; and rsp, -16; call)
+            rb"\xe8\x00\x00\x00\x00[\x58-\x5f]",  # call $+5 then pop -- get EIP
+        )
+        return any(re.search(p, data) for p in prologues)
+
+    @staticmethod
+    def _peb_access(data: bytes) -> bool:
+        """Reading the PEB/TEB straight out of fs/gs, as shellcode does."""
+        patterns = (
+            rb"\x64\xa1\x30\x00\x00\x00",                    # mov eax, fs:[0x30]
+            rb"\x64\x8b[\x00-\xff]\x30\x00\x00\x00",        # mov reg, fs:[0x30]
+            rb"\x65\x48\x8b[\x00-\xff]\x25\x60\x00\x00\x00",  # mov rax, gs:[0x60]
+        )
+        return any(re.search(p, data) for p in patterns)
 
     ###############################################################
 
@@ -688,8 +866,6 @@ class OverviewAnalysis:
 
         system_owners = {"system", "services.exe", "lsass.exe", "wininit.exe", "svchost.exe", "spoolsv.exe"}
         lolbin_clients = {"powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"}
-        # Service/admin ports that are risky to the internet from workstations
-        admin_ports = {22, 23, 53, 80, 443, 445, 3389, 5985, 5986, 5900}
         # Common "okay" ports (for de-noising uncommon test)
         common_ports = {
             80, 443, 53, 123, 25, 110, 995, 143, 993, 3389, 445, 139, 22, 21, 23,
@@ -725,7 +901,11 @@ class OverviewAnalysis:
                 if fp_i in suspicious_ports:
                     score += 10; flags += ["BadPort"]; why.append(f"Known suspicious dest port {fp_i}")
                 elif fp_i not in common_ports:
-                    score += 8; flags += ["UncommonPort"]; why.append(f"Uncommon dest port {fp_i} to public {fip}")
+                    # Weighted low on purpose: plenty of ordinary traffic (QUIC,
+                    # CDNs, game and chat clients) lands outside the common set, so
+                    # on its own this is an observation rather than a finding. It
+                    # used to score 8, which cleared the old threshold by itself.
+                    score += 4; flags += ["UncommonPort"]; why.append(f"Uncommon dest port {fp_i} to public {fip}")
 
             # Baseline: established→public only matters with a co-signal
             cosignal = any(t in flags for t in ("UnexpectedListener","HighPortListener","AdminPortOutbound","LOLBINOutbound","BadPort","UncommonPort"))
@@ -1003,25 +1183,59 @@ class OverviewAnalysis:
         mp = (res.artifacts or {}).get("plugins") or {}
         return mp.get(name, os.path.join(artifacts_dir, f"{name}.json"))
 
+    @staticmethod
+    def _flatten_tree(rows: Optional[List[dict]]) -> List[dict]:
+        """Every node of a Volatility tree, not just its roots.
+
+        pstree renders as a hierarchy: the JSON is a list of root processes with
+        their descendants nested under `__children`. Iterating the top level alone
+        therefore only ever saw the handful of processes with no visible parent,
+        which is why the path Volatility supplies never reached the census and
+        every path-based rule below was unreachable.
+        """
+        out: List[dict] = []
+        stack = list(rows or [])
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            out.append(node)
+            children = node.get("__children")
+            if isinstance(children, list):
+                stack.extend(children)
+        return out
+
     def _build_census(self, pslist: List[dict], pstree: List[dict]) -> Dict[int, Dict[str, Any]]:
         census: Dict[int, Dict[str, Any]] = {}
         for r in pslist or []:
             pid = self._as_int(r.get("PID") or r.get("Pid") or r.get("pid"))
             if pid is None:
                 continue
-            name = (r.get("ImageFileName")).strip()
+            # pslist emits a null ImageFileName for processes whose EPROCESS could
+            # not be read; .strip() on that raised AttributeError.
+            name = (r.get("ImageFileName") or "").strip()
             ppid = self._as_int(r.get("PPID") or r.get("ppid"))
             wow64 = bool(r.get("Wow64")) if r.get("Wow64") is not None else None
             start = r.get("CreateTime") or r.get("StartTime") or r.get("Start")
-            census[pid] = {"pid": pid, "name": name, "ppid": ppid, "wow64": wow64, "start": start}
+            census[pid] = {"pid": pid, "name": name, "ppid": ppid, "wow64": wow64,
+                           "start": start, "path": ""}
 
-        for r in pstree or []:
+        for r in self._flatten_tree(pstree):
             pid = self._as_int(r.get("PID") or r.get("Pid") or r.get("pid"))
-            if pid is None or pid not in census:
+            if pid is None:
                 continue
-            census[pid]["ppid"] = census[pid].get("ppid") or self._as_int(r.get("PPID"))
-            census[pid]["path"] = census[pid].get("path") or (r.get("Path") or r.get("Cmd"))
-            census[pid]["name"] = census[pid].get("name") or (r.get("ImageFileName"))
+            entry = census.setdefault(pid, {"pid": pid, "name": "", "ppid": None,
+                                            "wow64": None, "start": None, "path": ""})
+            if entry.get("ppid") is None:
+                entry["ppid"] = self._as_int(r.get("PPID"))
+            if not entry.get("path"):
+                # Path is the image path; Cmd is the full command line, which is a
+                # usable stand-in when the PEB gave us no path.
+                entry["path"] = (r.get("Path") or r.get("Cmd") or "").strip()
+            if not entry.get("name"):
+                entry["name"] = (r.get("ImageFileName") or "").strip()
+            if entry.get("wow64") is None and r.get("Wow64") is not None:
+                entry["wow64"] = bool(r.get("Wow64"))
         return census
    
     def _flatten_UA_with_context(self, rows):
@@ -1104,14 +1318,27 @@ class OverviewAnalysis:
         return tuple(row_list)
 
     @classmethod        
-    def _risk_from_score(cls, s: int) -> str:         
-        if s >= 20:
-            return "Critical"
-        if s >= 14:
-            return "High"
-        if s >= 9:
-            return "Medium"
+    def _risk_from_score(cls, s: int) -> str:
+        for label, floor in cls.RISK_BANDS:
+            if s >= floor:
+                return label
         return "Low"
+
+    def _threshold(self, surface: str) -> int:
+        """Score a `surface` row must reach to be shown.
+
+        The per-surface default, raised if the caller asked for a higher band.
+        """
+        base = self.SURFACE_THRESHOLDS.get(surface, 9)
+        return max(base, self.MIN_RISK.get(self._min_risk, 0))
+
+    def _keep(self, rows: List[Any], risk_index: int) -> List[Any]:
+        """Filter already-labelled rows down to the requested minimum band."""
+        floor = self.MIN_RISK.get(self._min_risk, 0)
+        if floor <= 0:
+            return rows
+        allowed = {label for label, f in self.RISK_BANDS if f >= floor}
+        return [r for r in rows if str(r[risk_index]) in allowed]
 
     @staticmethod
     def _is_hexdump_susp(hexdump: str) -> bool:
