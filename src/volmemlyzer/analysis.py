@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 import ipaddress, os, copy, re
 from .extractors import extract_winInfo_features
-from .utilities import load_records_any, not_system_path, cheap_image_hash, canonical_path_key
+from .utilities import load_records_any, not_system_path, cheap_image_hash, canonical_path_key, in_user_install_dir
 from .utilities import char_entropy, is_non_ascii, is_suspicious_path, write_json
 from .pipeline import Pipeline
 from .terminalUI import TerminalUI
@@ -988,6 +988,13 @@ class OverviewAnalysis:
             non_system_payload = bool(data) and _looks_pathlike(data) and not_system_path(data)
         except Exception:
             non_system_payload = False
+        # A per-user install root is not a system path, but it is where a lot of
+        # ordinary software lives, so an auto-start task pointing into one is the
+        # product updating itself rather than a finding.
+        try:
+            vendor_install = non_system_payload and in_user_install_dir(data)
+        except Exception:
+            vendor_install = False
 
         in_profile_hint = any(t in ((la + aa)) for t in ("\\appdata\\","\\temp\\","\\users\\public\\","\\downloads\\","\\desktop\\"))
         autostart = any(x in trig.lower() for x in ("logon","startup","boot"))
@@ -1004,8 +1011,10 @@ class OverviewAnalysis:
             score += 12; why.append("Risky script/obfuscation/remote content")
         if has_script:
             score += 10; why.append("Script payload")
-        if non_system_payload:
+        if non_system_payload and not vendor_install:
             score += 10; why.append("Non-system/user-writable path")
+        elif vendor_install:
+            score += 2; why.append("Per-user install directory")
 
         # --- Synergy ---
         if is_lolbin and (has_risky or has_script or has_remote_url or non_system_payload):
@@ -1029,7 +1038,7 @@ class OverviewAnalysis:
             score += 1; why.append("COM reg via regsvr32")
 
         # --- Benign Microsoft/system32 cap (no major => cap to Low) ---
-        no_major = not (has_risky or has_script or has_remote_url or non_system_payload)
+        no_major = not (has_risky or has_script or has_remote_url or (non_system_payload and not vendor_install))
         if is_microsoft_default and looks_system32_action and no_major:
             score = min(score, 4)
             if "Microsoft default/system32 baseline" not in why:

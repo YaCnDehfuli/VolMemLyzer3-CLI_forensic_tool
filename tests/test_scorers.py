@@ -288,3 +288,99 @@ def test_high_level_is_the_same_knob_as_min_risk_high():
     eng = OverviewAnalysis()
     eng._min_risk = "high" if True else eng._min_risk
     assert eng._threshold("netscan") == OverviewAnalysis("high")._threshold("netscan")
+
+
+# --------------------------------------------------------------------------
+# scheduled tasks, against rows taken from a real Windows 10 image
+#
+# The machine these came from surfaced 286 of its 323 scheduled tasks as
+# indicators. Almost all of them were Windows' own maintenance tasks, flagged
+# because "%windir%\system32\..." could not be resolved on the analysis host and
+# so read as a non-system path.
+# --------------------------------------------------------------------------
+
+def _task(name, action, args="", trigger="", principal="", enabled=True):
+    return {"Task Name": name, "Action": action, "Action Arguments": args,
+            "Trigger Type": trigger, "Principal ID": principal, "Enabled": enabled}
+
+
+STOCK_TASKS = [
+    _task("PcaWallpaperAppDetect", "%windir%\\system32\\rundll32.exe",
+          "%windir%\\system32\\PcaSvc.dll,PcaWallpaperAppDetect", "Time", "Users"),
+    _task("PcaPatchDbTask", "%windir%\\system32\\rundll32.exe",
+          "%windir%\\system32\\PcaSvc.dll,PcaPatchSdbTask", "Time"),
+    _task("Pre-staged app cleanup", "%windir%\\system32\\rundll32.exe",
+          "%windir%\\system32\\AppxDeploymentClient.dll,AppxPreStageCleanupRunTask", "Logon"),
+    _task("Proxy", "%windir%\\system32\\rundll32.exe",
+          "/d acproxy.dll,PerformAutochkOperations", "Boot"),
+    _task("BfeOnServiceStartTypeChange", "%windir%\\system32\\rundll32.exe",
+          "bfe.dll,BfeOnServiceStartTypeChange"),
+    _task("Recovery-Check", "%SystemRoot%\\System32\\dsregcmd.exe",
+          "/checkrecovery", "Logon", "InteractiveUsers"),
+    _task("StartupAppTask", "%windir%\\system32\\rundll32.exe",
+          "Startupscan.dll,SusRunTask", "", "Users", enabled=False),
+    _task("Automatic-Device-Join", "%SystemRoot%\\System32\\dsregcmd.exe",
+          "$(Arg0) $(Arg1) $(Arg2)", "Logon"),
+]
+
+
+@pytest.mark.parametrize("row", STOCK_TASKS, ids=lambda r: r["Task Name"])
+def test_windows_own_maintenance_tasks_do_not_surface(eng, row):
+    score, _ = eng._score_scheduled_task(row)
+    assert score < eng._threshold("scheduled_tasks"), (
+        f"{row['Task Name']} scored {score} and would be tabled")
+
+
+def test_a_per_user_vendor_updater_does_not_surface(eng):
+    """OneDrive genuinely installs under LocalAppData and updates on a schedule."""
+    row = _task("OneDrive Reporting Task-S-1-5-21-2515051972",
+                "%localappdata%\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe",
+                "", "Time")
+    score, _ = eng._score_scheduled_task(row)
+    assert score < eng._threshold("scheduled_tasks")
+
+
+@pytest.mark.parametrize("name,script", [
+    ("LOG", "C:\\Workspace\\export_logs.ps1"),
+    ("PID", "C:\\Workspace\\log_pid.ps1"),
+    ("UTG", "C:\\Workspace\\UTG\\launch.ps1"),
+])
+def test_a_powershell_script_run_at_logon_surfaces(eng, name, script):
+    score, why = eng._score_scheduled_task(_task(name, "PowerShell", script, "Logon", "Author"))
+    assert score >= eng._threshold("scheduled_tasks")
+    assert eng._risk_from_score(score) in {"High", "Critical"}
+    assert any("Script" in w for w in why)
+
+
+def test_an_encoded_powershell_task_surfaces(eng):
+    score, _ = eng._score_scheduled_task(
+        _task("Updater", "powershell.exe", "-nop -w hidden -enc SQBFAFgA", "Logon"))
+    assert score >= eng._threshold("scheduled_tasks")
+
+
+# --------------------------------------------------------------------------
+# path classification must not depend on the machine running the analysis
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path,expected", [
+    ("%windir%\\system32\\rundll32.exe", False),
+    ("%SystemRoot%\\System32\\dsregcmd.exe", False),
+    ("%ProgramFiles%\\Thing\\thing.exe", False),
+    ("%ProgramData%\\Thing\\thing.exe", False),
+    ("%LOCALAPPDATA%\\Temp\\evil.exe", True),
+    ("C:\\Workspace\\export_logs.ps1", True),
+])
+def test_windows_variables_resolve_without_a_windows_host(path, expected):
+    """%windir% has no meaning in the environment of a macOS or Linux analyst, so
+    resolving it from os.environ made the verdict depend on the analysis host."""
+    from volmemlyzer.utilities import not_system_path
+    assert not_system_path(path) is expected
+
+
+def test_the_host_environment_cannot_change_the_verdict(monkeypatch):
+    from volmemlyzer.utilities import not_system_path
+    before = not_system_path("%windir%\\system32\\rundll32.exe")
+    for var, value in [("WINDIR", "E:\\Windows"), ("SystemRoot", "E:\\Windows"),
+                       ("SystemDrive", "E:"), ("ProgramFiles", "E:\\Program Files")]:
+        monkeypatch.setenv(var, value)
+    assert not_system_path("%windir%\\system32\\rundll32.exe") == before
