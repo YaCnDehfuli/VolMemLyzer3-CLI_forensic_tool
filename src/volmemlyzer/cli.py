@@ -116,9 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Path to volatility3 vol.py (optional; auto-detected if omitted)")
     p.add_argument("--renderer", default=os.getenv("VMY_RENDERER", "json"),
                    help=f"Renderer for raw plugin runs {sorted(_ALLOWED_RENDERERS)}")
-    p.add_argument("--timeout", type=int, default=int(os.getenv("VMY_TIMEOUT", "0")) or None,
-                   help="Per-plugin timeout seconds (0 disables)")
-    p.add_argument("-j", "--jobs", type=int, default=1, #max(1, os.cpu_count() or 1),
+    p.add_argument("--timeout", type=int, default=int(os.getenv("VMY_TIMEOUT", "1800")),
+                   help="Per-plugin timeout in seconds (0 disables the cap). A pool "
+                        "scanner on a large image can otherwise run for hours with no "
+                        "upper bound")
+    p.add_argument("-j", "--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
                    help="Parallel workers for plugin execution")
     p.add_argument("--log-level", default=os.getenv("VMY_LOG", "INFO"),
                    choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
@@ -141,8 +143,15 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("-o", "--outdir", default=None, help="Artifacts directory (defaults near image)")
     a.add_argument("--steps", default=None, help="Comma list of steps (e.g. 0,1,2 or bearings,processes)")
     a.add_argument("--no-cache", action="store_true", help="Ignore cached plugin outputs")
+    a.add_argument("--min-risk", default=None, choices=["low", "medium", "high", "critical"],
+                   help="Lowest risk band to show. These bands surface signal for "
+                        "review; they are not detections")
     a.add_argument("--high-level", action="store_true",
-                   help="Only surface high-risk findings when the analysis supports it")
+                   help="Shorthand for --min-risk high")
+    a.add_argument("--deep", action="store_true",
+                   help="Add the slow cross-check plugins to the census (psxview). "
+                        "psxview re-runs psscan, thrdscan and a csrss handle sweep "
+                        "internally, so expect it to dominate the run")
     a.add_argument("--json", action="store_true", help="Write the summary to the outdir with json format")
 
     # Mode 2: run raw plugins
@@ -245,9 +254,6 @@ def handle_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
     if args.jobs > os.cpu_count():
         parser.error(f"--jobs must be less than the available number of CPUs: {os.cpu_count()}. Recommended Value is {max(1, (os.cpu_count() or 2) // 2)}")
     
-    if args.timeout is not None and args.timeout < 1:
-        parser.error("--timeout cannot be zero or negative")
-
     # vol.py path
     if args.vol_path and os.getenv("VOL_PATH") is None:
         is_vol_name = os.path.basename(args.vol_path).lower() == "vol.py"
@@ -361,9 +367,12 @@ def handle_analysis(args) -> int:
         steps=steps,
         use_cache=(not args.no_cache),
         high_level=args.high_level,
+        concurrency=args.jobs,
+        deep=args.deep,
+        min_risk=args.min_risk,
     )
     if args.json:
-        img_name = args.image.split("\\")[-1]
+        img_name = os.path.basename(args.image)
         analysis_file = os.path.join(analysis_dir, f"{img_name}.json")
         write_json(analysis_file, res)  
     return 0
@@ -437,7 +446,7 @@ def handle_features(args) -> int:
             artifacts_dir=outdir,
             use_cache=(not args.no_cache),
         )
-        img_name = img.split("\\")[-1]
+        img_name = os.path.basename(img)
         feat_file = os.path.join(feature_dir, f"{img_name}.{args.format}")
         if args.format == 'csv':
             write_csv(feat_file, asdict(row))
@@ -463,6 +472,19 @@ def handle_list(args) -> int:
         vol = []
     reg = sorted(pipe.registry.names()) if want_reg else []
 
+    # What each registered name will actually be passed to Volatility as. This is
+    # the whole point of the column: it makes a name mismatch visible without a
+    # memory image and without waiting for a run to fail.
+    resolved: dict[str, str] = {}
+    if want_reg:
+        for name in reg:
+            spec, _ = pipe.registry.get(name)
+            try:
+                hit = pipe.runner.resolve_plugin(spec.name, spec.candidates)
+            except Exception:
+                hit = None
+            resolved[name] = hit or "NOT AVAILABLE"
+
     # Filter
     if args.grep:
         q = args.grep.lower()
@@ -473,6 +495,8 @@ def handle_list(args) -> int:
     if args.max and args.max > 0:
         vol = vol[:args.max]
         reg = reg[:args.max]
+
+    unavailable = [n for n in reg if resolved.get(n) == "NOT AVAILABLE"]
 
     # Pretty table (Rich); fallback to plain text if Rich missing
     try:
@@ -488,24 +512,31 @@ def handle_list(args) -> int:
         if want_vol:
             tbl.add_column(f"Volatility3 plugins ({len(vol)}) as of {date.today()} ", style="cyan", ratio=1, overflow="fold")
         if want_reg:
-            tbl.add_column(f"Available Plugins in VolmemLyzer registry ({len(reg)})", style="cyan", ratio=1, overflow="fold")
+            tbl.add_column(f"VolmemLyzer registry ({len(reg)})", style="cyan", ratio=1, overflow="fold")
+            tbl.add_column("Resolved as", style="cyan", ratio=1, overflow="fold")
 
         rows = max(len(vol) if want_vol else 0, len(reg) if want_reg else 0)
         for i in range(rows):
             left  = vol[i] if (want_vol and i < len(vol)) else ""
             right = reg[i] if (want_reg and i < len(reg)) else ""
+            got   = resolved.get(right, "") if right else ""
+            if got == "NOT AVAILABLE":
+                got = f"[red]{got}[/red]"
             if want_vol and want_reg:
-                tbl.add_row(left, right)
+                tbl.add_row(left, right, got)
             elif want_vol:
                 tbl.add_row(left)
             else:
-                tbl.add_row(right)
+                tbl.add_row(right, got)
 
         console.print(Panel(tbl, title=f"Available Components", border_style="bright_blue"))
         if args.grep:
             console.print(f"[dim]Filter:[/dim] {args.grep}")
         if args.max and args.max > 0:
             console.print(f"[dim]Showing at most {args.max} per column.[/dim]")
+        if unavailable:
+            console.print(f"[red]{len(unavailable)} registered plugin(s) are not in this "
+                          f"Volatility build and will be skipped:[/red] {', '.join(unavailable)}")
     except Exception:
         # Plain fallback
         if want_vol:
@@ -515,7 +546,7 @@ def handle_list(args) -> int:
         if want_reg:
             print(f"[registry] {len(reg)} extractor(s):")
             for n in reg:
-                print("  -", n)
+                print(f"  - {n:24s} -> {resolved.get(n, '')}")
         if not want_vol and not want_reg:
             print("Tip: use --registry and/or --vol")
 
@@ -538,7 +569,7 @@ def show_help() -> None:
         print("VolMemLyzer — Memory forensics over Volatility 3".center(w))
         print("USAGE  volmemlyzer [GLOBAL OPTIONS] <command> [COMMAND OPTIONS]\n")
         print("[GLOBAL] --vol-path PATH | --renderer R | --timeout SEC | -j/--jobs N | --log-level L\n")
-        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --high-level ; --json\n")
+        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --min-risk BAND ; --deep ; --json\n")
         print("[run]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --renderer R ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[extract]\n  -i/--image PATH (req,file|dir) ; -o/--outdir DIR ; -f/--format FMT(json|csv, req) ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[list]\n  --vol ; --registry")
@@ -556,7 +587,7 @@ def show_help() -> None:
     globals_block = Text(
         "--vol-path [path]    Path to vol.py (optional)\n"
         f"--renderer [r]       Default raw renderer [{allowed}]\n"
-        "--timeout [sec]      Per-plugin timeout (0 disables)\n"
+        "--timeout [sec]      Per-plugin timeout, default 1800 (0 disables)\n"
         "-j, --jobs [n]       Parallel workers\n"
         "--log-level [L]      CRITICAL | ERROR | WARNING | INFO | DEBUG",
         no_wrap=False, overflow="fold"
@@ -568,7 +599,9 @@ def show_help() -> None:
         "-o, --outdir DIR   artifacts dir\n"
         "--steps LIST       0–6 or aliases\n"
         "--no-cache         fresh runs\n"
-        "--high-level       high-risk only\n"
+        "--min-risk BAND    low|medium|high|critical\n"
+        "--high-level       same as --min-risk high\n"
+        "--deep             add psxview (slow)\n"
         "--json             write analysis JSON"
     )
     run_block = (
@@ -617,6 +650,12 @@ def main(argv: list[str] | None = None) -> int:
     preparse_flag_lints(parser, sys.argv[1:] if argv is None else argv)
 
     args = parser.parse_args(argv)
+
+    # 0 means "no cap"; everything downstream reads None for that.
+    if getattr(args, "timeout", None) is not None:
+        if args.timeout < 0:
+            parser.error("--timeout cannot be negative (use 0 to disable the cap)")
+        args.timeout = args.timeout or None
 
     # Logging
     logging.basicConfig(

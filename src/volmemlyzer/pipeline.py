@@ -1,8 +1,9 @@
 # File: pipeline.py
 from __future__ import annotations
-import os, logging, json, csv, re
-from typing import Dict, Any, Set, List, Optional, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os, logging, json, csv, re, threading
+from functools import partial
+from typing import Dict, Any, Set, List, Optional, Iterable, Callable
+from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait
 from .core import FeatureRow, ExtractResult, ActionResult
 from .runner import VolRunner
 from .extractor_registry import ExtractorRegistry
@@ -16,11 +17,14 @@ class Pipeline:
         self.runner = runner
         self.registry = registry
         # name -> why it failed, for the most recent run on this Pipeline.
+        # Written from worker threads, so every touch goes through the lock.
         self._failed_plugins: Dict[str, str] = {}
+        self._failed_lock = threading.Lock()
 
     @property
     def failed_plugins(self) -> Dict[str, str]:
-        return dict(self._failed_plugins)
+        with self._failed_lock:
+            return dict(self._failed_plugins)
 
     # ---------- Public API ----------
 
@@ -36,12 +40,12 @@ class Pipeline:
         use_cache: bool = True,
         strict: bool = False
     ) -> ActionResult:
-        selected = self._select(enable, drop)
-        layers = self.registry.topo_layers(selected)
         outdir = outdir or self._default_artifacts_dir(image_path)
         os.makedirs(outdir, exist_ok=True)
         artifact_map: Dict[str, str] = {}
-        self._failed_plugins = {}
+        with self._failed_lock:
+            self._failed_plugins = {}
+        selected = self.preflight(self._select(enable, drop))
 
         want_ext = renderer_to_ext(renderer)
         img_name = os.path.basename(image_path)
@@ -50,7 +54,7 @@ class Pipeline:
             spec, _ = self.registry.get(name)
             # 1) exact cache hit?
             if use_cache:
-                chk = self.check_cache(outdir, spec.name, img_name, require_format=want_ext)
+                chk = self.check_cache(outdir, spec.name, img_name, require_format=want_ext, strict=strict)
                 if chk["ok"]:
                     src_path = chk["path"]
                     src_format = chk["format"]
@@ -71,20 +75,10 @@ class Pipeline:
                 self._note_failure(spec.name, run)
             return name, out_path
 
-        # topo-order, per-layer concurrency
-        for layer in layers:
-            if concurrency > 1 and len(layer) > 1:
-                logger.info("Running plugins: <<{}>> in paralell".format(', '.join(map(str, layer))))
-                with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                    futs = {pool.submit(_run_one, n): n for n in layer}
-                    for fut in as_completed(futs):
-                        n, p = fut.result()
-                        artifact_map[n] = p
-            else:
-                for n in layer:
-                    logger.info("Running plugin %s", n)
-                    k, p = _run_one(n)
-                    artifact_map[k] = p
+        def _collect(name: str, result) -> None:
+            artifact_map[result[0]] = result[1]
+
+        self._run_graph(selected, _run_one, concurrency, _collect)
 
         self._warn_if_widely_failed(len(selected))
         return ActionResult(artifacts={"raw_dir": outdir, "plugins": artifact_map,
@@ -100,14 +94,14 @@ class Pipeline:
         artifacts_dir: Optional[str] = None,
         use_cache: bool = True,
     ) -> FeatureRow:
-        selected = self._select(enable, drop)
-        layers = self.registry.topo_layers(selected)
         artifacts_dir = artifacts_dir or self._default_artifacts_dir(image_path)
         os.makedirs(artifacts_dir, exist_ok=True)
 
         features: Dict[str, Any] = {}
         context_map: Dict[str, Any] = {}
-        self._failed_plugins = {}
+        with self._failed_lock:
+            self._failed_plugins = {}
+        selected = self.preflight(self._select(enable, drop))
 
         def _task(name: str):
             spec, extractor = self.registry.get(name)
@@ -120,23 +114,13 @@ class Pipeline:
             extr: ExtractResult = extractor(json_path, context=dep_ctx)
             return name, extr
 
-        for layer in layers:
-            if concurrency > 1 and len(layer) > 1:
-                logger.info("Running plugins: <<{}>> in paralell".format(', '.join(map(str, layer))))
-                with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                    futs = {pool.submit(_task, n): n for n in layer}
-                    for fut in as_completed(futs):
-                        k, extr = fut.result()
-                        if extr.context is not None:
-                            context_map[k] = extr.context
-                        features.update(extr.features or {})
-            else:
-                for n in layer:
-                    logger.info("Running plugin %s", n)
-                    k, extr = _task(n)
-                    if extr.context is not None:
-                        context_map[k] = extr.context
-                    features.update(extr.features or {})
+        def _collect(name: str, result) -> None:
+            k, extr = result
+            if extr.context is not None:
+                context_map[k] = extr.context
+            features.update(extr.features or {})
+
+        self._run_graph(selected, _task, concurrency, _collect)
 
         self._warn_if_widely_failed(len(selected))
         row = FeatureRow(
@@ -150,11 +134,12 @@ class Pipeline:
 
     def _warn_if_widely_failed(self, attempted: int) -> None:
         """A handful of failures is normal; nearly all of them means one cause."""
-        failed = len(self._failed_plugins)
+        current = self.failed_plugins
+        failed = len(current)
         if not failed:
             return
         logger.warning("%d of %d plugins produced no usable output: %s",
-                       failed, attempted, ", ".join(sorted(self._failed_plugins)))
+                       failed, attempted, ", ".join(sorted(current)))
         if attempted and failed >= max(3, int(attempted * 0.5)):
             logger.error(
                 "Most plugins failed, which usually means one shared cause rather than "
@@ -183,6 +168,128 @@ class Pipeline:
             use_cache=use_cache,
             high_level= high_level
         )
+
+    # ---------- Scheduling ----------
+
+    def _run_graph(self, names: Iterable[str], run_one: Callable[[str], Any],
+                   concurrency: int, on_done: Callable[[str, Any], None]) -> None:
+        """Run `names` in dependency order, without layer barriers.
+
+        This used to walk topological layers, opening a fresh ThreadPoolExecutor
+        per layer and draining it completely before starting the next. One slow
+        plugin therefore held its layer's barrier shut and everything else queued
+        behind it, related or not: a psxview that runs for three hours stalled the
+        entire analysis even though nothing depends on psxview.
+
+        Here a plugin starts the moment its own dependencies are satisfied and
+        waits for nothing else. Completions are reaped one at a time
+        (FIRST_COMPLETED) rather than in batches, so a fast plugin finishing
+        behind a slow one is handed back immediately.
+
+        `on_done` is called on the calling thread, in completion order, before any
+        dependent is submitted -- extractors read their dependency's context from
+        it, so that ordering is a correctness requirement, not a convenience.
+        """
+        names = [n.lower() for n in names]
+        if not names:
+            return
+
+        unmet, dependents = self.registry.ready_graph(set(names))
+        rank = {n: i for i, n in enumerate(self.registry.cost_sorted(names))}
+        in_order = lambda seq: sorted(seq, key=lambda n: rank[n])
+
+        def release(finished: str) -> List[str]:
+            """Dependencies satisfied by `finished` -> whoever is now ready."""
+            freed = []
+            for dep in dependents.get(finished, ()):
+                waiting = unmet.get(dep)
+                if waiting is None:
+                    continue
+                waiting.discard(finished)
+                if not waiting:
+                    freed.append(dep)
+                    unmet.pop(dep, None)
+            return in_order(freed)
+
+        ready = in_order([n for n in names if not unmet.get(n)])
+        for n in ready:
+            unmet.pop(n, None)
+        started = set(ready)
+
+        if concurrency <= 1:
+            # Same graph, same order, one at a time -- kept deterministic so a
+            # sequential run is reproducible when something needs debugging.
+            queue = list(ready)
+            while queue:
+                name = queue.pop(0)
+                logger.info("Running plugin %s", name)
+                self._settle(name, partial(run_one, name), on_done)
+                freed = [n for n in release(name) if n not in started]
+                started.update(freed)
+                queue = in_order(queue + freed)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="volmemlyzer") as pool:
+                futures = {}
+
+                def submit(batch: List[str]) -> None:
+                    for name in batch:
+                        logger.info("Running plugin %s", name)
+                        futures[pool.submit(run_one, name)] = name
+
+                submit(ready)
+                while futures:
+                    done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+                    freed: List[str] = []
+                    for fut in done:
+                        name = futures.pop(fut)
+                        self._settle(name, fut.result, on_done)
+                        freed.extend(n for n in release(name) if n not in started)
+                    started.update(freed)
+                    submit(in_order(freed))
+
+        if unmet:
+            # ready_graph already drops deps outside the selection, so anything
+            # left here is a genuine cycle in the plugin table.
+            raise ValueError(f"Dependency cycle among plugins: {sorted(unmet)}")
+
+    def _settle(self, name: str, produce: Callable[[], Any], on_done: Callable[[str, Any], None]) -> None:
+        """Deliver one plugin's result, or record why it produced none.
+
+        A raising worker must not take the run down with it: the remaining
+        plugins are independent of it and their output is still worth having.
+        """
+        try:
+            value = produce()
+        except Exception as exc:
+            logger.exception("Plugin %s raised", name)
+            with self._failed_lock:
+                self._failed_plugins[name] = f"raised {type(exc).__name__}: {exc}"
+            return
+        on_done(name, value)
+
+    def preflight(self, selected: Set[str]) -> Set[str]:
+        """Drop plugins this Volatility install does not have, and say which.
+
+        Worth doing before the first run rather than after: an unavailable plugin
+        otherwise costs a full launch to discover, once per plugin, and reports
+        itself as an ordinary failure among the real ones.
+        """
+        usable, missing = set(), []
+        for name in selected:
+            spec, _ = self.registry.get(name)
+            if self.runner.resolve_plugin(spec.name, spec.candidates):
+                usable.add(name)
+            else:
+                missing.append(name)
+        if missing:
+            logger.warning(
+                "Skipping %d plugin(s) this Volatility does not provide: %s",
+                len(missing), ", ".join(sorted(missing)))
+            with self._failed_lock:
+                for name in missing:
+                    self._failed_plugins[name] = "not available in this Volatility build"
+        return usable
+
     # ---------- Core helpers ----------
 
     def _run_or_fetch_plugin_output(
@@ -223,7 +330,8 @@ class Pipeline:
         stderr_path = getattr(run, "stderr_path", None)
         if stderr_path:
             detail += f"; see {stderr_path}"
-        self._failed_plugins[name] = detail
+        with self._failed_lock:
+            self._failed_plugins[name] = detail
 
 
     # ---------- Cache validation (single source of truth) ----------
