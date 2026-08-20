@@ -1,8 +1,3 @@
-# # === PATCH 1/4: analysis.py (drop-in replacement for OverviewAnalysis) ===
-# # Each workflow step is a distinct method. Steps do not auto-run the others;
-# # you can call any subset in any order. The terminal output is wide, clean,
-# # and academically phrased.
-
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 import ipaddress, os, copy, re
