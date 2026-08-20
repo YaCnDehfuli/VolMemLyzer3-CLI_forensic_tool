@@ -80,10 +80,19 @@ Global options must appear before the subcommand:
 ```text
 --vol-path PATH     Path to vol or vol.py; auto-detected when omitted
 --renderer NAME     json, jsonl, csv, pretty, quick, or none
---timeout SECONDS   Per-plugin timeout; 0 disables the timeout
--j, --jobs N        Number of parallel workers
+--timeout SECONDS   Per-plugin timeout, default 1800; 0 disables the cap
+-j, --jobs N        Number of parallel workers, default half the CPU count
 --log-level LEVEL   CRITICAL, ERROR, WARNING, INFO, or DEBUG
 ```
+
+Plugins run against a dependency graph rather than in lockstep batches: each one
+starts as soon as its own inputs are ready, so a long pool scan never holds up
+work that does not depend on it. Raise `-j` to overlap more of them.
+
+Plugin names are resolved against the Volatility you actually have installed, so
+relocations such as `windows.malfind` moving to `windows.malware.malfind` are
+handled without changes here. `volmemlyzer list --registry` prints the resolved
+name for every extractor and flags anything your build does not provide.
 
 ### `analyze`
 
@@ -102,7 +111,15 @@ volmemlyzer \
   --json
 ```
 
+Every plugin the requested steps need is collected in a single scheduled run
+before any step interprets its output, so the steps overlap instead of queueing.
+
 Use `--no-cache` to force fresh plugin runs. Supported step aliases include `bearings`, `processes`, `injections`, `network`, `persistence`, `kernel`, and `report`.
+
+`--deep` adds the slow cross-check plugins to the process census. Today that is
+`psxview`, which re-runs `psscan`, `thrdscan` and a csrss handle sweep internally
+and will dominate the run on a large image; the census itself comes from
+`pslist`, `pstree` and `psscan` without it.
 
 ### `run`
 

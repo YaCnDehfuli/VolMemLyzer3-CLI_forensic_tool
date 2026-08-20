@@ -38,6 +38,38 @@ class ExtractorRegistry:
     def specs(self) -> List[PluginSpec]:
         return [self._specs[n] for n in self.names()]
 
+    def ready_graph(self, selected: Set[str]) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+        """Dependency edges for `selected`, as (unmet_deps, dependents).
+
+        `unmet_deps[n]` is what n is still waiting on; `dependents[n]` is who is
+        waiting on n. A scheduler can then start each plugin as soon as its own
+        entry empties, instead of waiting for a whole topological layer to drain.
+
+        Dependencies outside the selection are dropped, matching topo_layers: if
+        the caller did not ask for pslist, psscan should still run rather than
+        deadlock waiting for it.
+        """
+        sel = {n.lower() for n in selected}
+        unknown = [n for n in sel if n not in self._specs]
+        if unknown:
+            raise KeyError(f"Unknown plugins in selection: {unknown}")
+
+        unmet: Dict[str, Set[str]] = {n: set(self._specs[n].deps) & sel for n in sel}
+        dependents: Dict[str, Set[str]] = {n: set() for n in sel}
+        for name, deps in unmet.items():
+            for dep in deps:
+                dependents[dep].add(name)
+        return unmet, dependents
+
+    def cost_sorted(self, names) -> List[str]:
+        """Heaviest first, then alphabetical.
+
+        Submission order is start order for a bounded pool, so putting the long
+        scanners in first is what keeps the tail short: a heavy plugin started
+        last leaves every worker but one idle while it finishes.
+        """
+        return sorted(names, key=lambda n: (self._specs[n.lower()].cost_rank, n.lower()))
+
     def topo_layers(self, selected: Set[str]) -> List[Set[str]]:
         """Return dependency layers from the selected plugin names."""
         sel = {n.lower() for n in selected}
