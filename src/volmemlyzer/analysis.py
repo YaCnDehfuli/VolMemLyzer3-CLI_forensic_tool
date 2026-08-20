@@ -27,6 +27,27 @@ class OverviewAnalysis:
     # Plugin-specific surfacing BASELINE_SCORES
     BASELINE_SCORES = {'scheduled_tasks': 3, 'userassist': 2, 'netscan': 4, 'malfind' : 4, "process" : 4}
 
+    def __init__(self):
+        # name -> artifact path, filled by _prefetch. The steps read from here
+        # instead of asking for the plugin again: a plugin that failed leaves an
+        # unusable file behind, so a cache lookup would miss and we would run the
+        # whole thing a second time to fail identically.
+        self._prefetched: Dict[str, str] = {}
+
+    # Which plugins each step reads. Used to collect everything the requested
+    # steps need into one scheduled run, before any step starts interpreting.
+    STEP_PLUGINS = {
+        0: ("info",),
+        1: ("pslist", "pstree", "psscan"),
+        2: ("malfind",),
+        3: ("netscan",),
+        4: ("registry.hivelist", "registry.hivescan", "scheduled_tasks", "registry.userassist"),
+    }
+    # psxview re-runs psscan, thrdscan and a csrss handle sweep internally, so it
+    # costs more than the rest of step 1 put together for evidence that largely
+    # duplicates psscan. Opt in with --deep when you want the cross-check.
+    DEEP_PLUGINS = {1: ("psxview",)}
+
     def run_steps(
         self,
         *,
@@ -36,19 +57,24 @@ class OverviewAnalysis:
         steps: Optional[Iterable[int]] = None,
         use_cache: bool = True,
         high_level: bool = False,
-        json: str = None
+        concurrency: int = 1,
+        deep: bool = False
     ) -> Dict[str, Any]:
         TerminalUI.banner("FORENSIC OVERVIEW – STEPWISE")
         artifacts_dir = artifacts_dir or pipe._default_artifacts_dir(image_path)
         results: Dict[str, Any] = {"image": os.path.basename(image_path),
                                    "quick_hash": cheap_image_hash(image_path)}
+        wanted = list(steps) if steps is not None else [0, 1, 2, 3, 4]
+        self._prefetch(pipe, image_path, artifacts_dir, wanted, use_cache, concurrency, deep)
+
         executed = []
-        for s in (list(steps) if steps is not None else [0,1,2,3,4]):
+        for s in wanted:
             if s == 0:
                 results["step0"] = self.step0_bearings(pipe, image_path, artifacts_dir, use_cache)
                 executed.append(0)
             elif s == 1:
-                results["step1"] = self.step1_processes(pipe, image_path, artifacts_dir, use_cache, high_level)
+                results["step1"] = self.step1_processes(pipe, image_path, artifacts_dir, use_cache, high_level,
+                                                        concurrency=concurrency, deep=deep)
                 executed.append(1)
             elif s == 2:
                 results["step2"] = self.step2_injections(pipe, image_path, artifacts_dir, use_cache, high_level)
@@ -61,6 +87,38 @@ class OverviewAnalysis:
                 executed.append(4)            
         results["executed_steps"] = executed
         return results
+
+    def _plugins_for(self, steps: Iterable[int], deep: bool) -> List[str]:
+        wanted: List[str] = []
+        for s in steps:
+            wanted.extend(self.STEP_PLUGINS.get(s, ()))
+            if deep:
+                wanted.extend(self.DEEP_PLUGINS.get(s, ()))
+        # preserve first-seen order, drop duplicates
+        seen, out = set(), []
+        for n in wanted:
+            if n not in seen:
+                seen.add(n); out.append(n)
+        return out
+
+    def _prefetch(self, pipe: Pipeline, image_path: str, artifacts_dir: str,
+                  steps: Iterable[int], use_cache: bool, concurrency: int, deep: bool) -> None:
+        """Produce every artifact the requested steps will read, in one scheduled run.
+
+        Without this the steps run one plugin at a time: each step calls
+        _ensure_one for its own plugin and blocks there, so malfind, netscan and
+        the four registry plugins queue up behind each other no matter what -j
+        says. Collecting them here lets the scheduler overlap them, and each step
+        then reads from cache.
+        """
+        wanted = [n for n in self._plugins_for(steps, deep) if pipe.registry.has(n)]
+        if not wanted:
+            return
+        TerminalUI.note(f"Collecting {len(wanted)} plugin artifact(s) with {concurrency} worker(s)")
+        result = pipe.run_plugin_raw(image_path=image_path, enable=set(wanted), renderer="json",
+                                     outdir=artifacts_dir, concurrency=concurrency,
+                                     use_cache=use_cache, strict=True)
+        self._prefetched = dict((result.artifacts or {}).get("plugins") or {})
 
     # ---------------- Step 0 ----------------
     def step0_bearings(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool) -> Dict[str, Any]:
@@ -81,17 +139,23 @@ class OverviewAnalysis:
         return {"ok": True}
 
     # ---------------- Step 1 ----------------
-    def step1_processes(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool, high_level: bool) -> Dict[str, Any]:
-        TerminalUI.section("Step 1 · Process census (pslist/pstree/psscan/psxview)")
+    def step1_processes(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool,
+                        high_level: bool, concurrency: int = 1, deep: bool = False) -> Dict[str, Any]:
+        enabled = ["pslist", "pstree", "psscan"] + (["psxview"] if deep else [])
+        TerminalUI.section(f"Step 1 · Process census ({'/'.join(enabled)})")
 
-        enabled = ["pslist", "pstree", "psscan", "psxview"]
-        action_result = pipe.run_plugin_raw(image_path=image_path, enable=enabled, use_cache=use_cache, renderer="json", outdir=artifacts_dir, strict= True)
-        out_path = action_result.artifacts.get("plugins")
+        out_path = {n: p for n, p in self._prefetched.items() if n in enabled}
+        missing = [n for n in enabled if n not in out_path]
+        if missing:
+            action_result = pipe.run_plugin_raw(image_path=image_path, enable=set(missing), use_cache=use_cache,
+                                                renderer="json", outdir=artifacts_dir,
+                                                concurrency=concurrency, strict=True)
+            out_path.update(action_result.artifacts.get("plugins") or {})
        
         pslist  = load_records_any(out_path.get("pslist"))
         pstree  = load_records_any(out_path.get("pstree"))
         psscan  = load_records_any(out_path.get("psscan"))
-        psxview = load_records_any(out_path.get("psxview"))
+        psxview = load_records_any(out_path.get("psxview")) if deep else None
     
         census = self._build_census(pslist, pstree)
         flags, susp = self._score_processes(census, psscan, psxview)
@@ -101,7 +165,9 @@ class OverviewAnalysis:
             ("psscan processes", flags.get("psscan_count")),
             ("psscan-only (hidden/terminated)", flags.get("hidden_count")),
             ("orphans (ppid missing)", flags.get("orphans")),
-            ("psxview inconsistencies", flags.get("psxview_inconsistent")),
+            # None, not 0: psxview was not run, so this is unknown rather than clean.
+            ("psxview inconsistencies", flags.get("psxview_inconsistent")
+             if flags.get("psxview_inconsistent") is not None else "not checked (use --deep)"),
         ])
         rows = [[str(pid), name or "", str(ppid or ""), str(score), flags, rationale] 
                     for pid, name, ppid, score, flags, rationale in susp]
@@ -427,11 +493,14 @@ class OverviewAnalysis:
 
     # ------------------------- Scorer functions --------------------------
 
-    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: List[dict], psxview: List[dict]) -> Tuple[Dict[str, Any], List[Tuple[int,str,Optional[int],int,str,str]]]:
+    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: List[dict], psxview: Optional[List[dict]]) -> Tuple[Dict[str, Any], List[Tuple[int,str,Optional[int],int,str,str]]]:
         pid_set = set(census.keys())
         psscan_pids = {self._as_int(r.get("PID") or r.get("pid")) for r in (psscan or [])}
         psscan_pids.discard(None)
 
+        # None means psxview was not run at all, which is not the same as psxview
+        # having found nothing; the summary must not claim a clean cross-check.
+        psxview_ran = psxview is not None
         psx_false: Dict[int, List[str]] = {}
         for r in psxview or []:
             pid = self._as_int(r.get("PID") or r.get("Pid") or r.get("pid"))
@@ -535,7 +604,7 @@ class OverviewAnalysis:
             "psscan_count": len(psscan_pids),
             "hidden_count": len([1 for pid in psscan_pids if pid not in pid_set]),
             "orphans": len([1 for pid, b in census.items() if b.get("ppid") and b.get("ppid") not in pid_set]),
-            "psxview_inconsistent": len(psx_false),
+            "psxview_inconsistent": len(psx_false) if psxview_ran else None,
         }
         rows.sort(key=lambda r: (-r[3], r[0]))
         rows = [self._score_map(row, -3) for row in rows]
@@ -926,6 +995,9 @@ class OverviewAnalysis:
     # --------------------------- helper primitives -------------------------
 
     def _ensure_one(self, pipe: Pipeline, image_path: str, artifacts_dir: str, name: str, use_cache: bool) -> str:
+        hit = self._prefetched.get(name)
+        if hit:
+            return hit
         res = pipe.run_plugin_raw(image_path=image_path, enable={name}, renderer="json",
                                 outdir=artifacts_dir, concurrency=1, use_cache=use_cache, strict= True)
         mp = (res.artifacts or {}).get("plugins") or {}
