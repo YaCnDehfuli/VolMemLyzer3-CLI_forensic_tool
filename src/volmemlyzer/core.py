@@ -13,6 +13,23 @@ class PluginSpec:
     deps: Tuple[str, ...] = ()  # ("threads",)
     timeout_s: Optional[int] = None  # Per-plugin timeout
     renderer: Optional[str] = None   # "json" | "jsonl" | "text" (None -> runner default)
+    # Fully-qualified Volatility names we would rather use, most current first.
+    # Volatility keeps relocating plugins (windows.malfind -> windows.malware.malfind)
+    # and leaves the old module behind as a shim with a removal date, so pinning a
+    # single name guarantees a break. VolRunner picks the first one this install has.
+    candidates: Tuple[str, ...] = ()
+    # Rough runtime class, used to order submissions so the long jobs start first.
+    # "fast"  -> reads structures the kernel already links together
+    # "scan"  -> sweeps the physical layer looking for pool tags
+    # "heavy" -> performs several such sweeps internally
+    cost: str = "fast"
+
+    COST_ORDER = {"heavy": 0, "scan": 1, "fast": 2}
+
+    @property
+    def cost_rank(self) -> int:
+        """Sort key: heaviest first, then by name for a stable order."""
+        return self.COST_ORDER.get(self.cost, 2)
 
 @dataclass
 class PluginRunResult:
