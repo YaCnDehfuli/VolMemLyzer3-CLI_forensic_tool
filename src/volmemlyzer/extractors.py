@@ -1151,7 +1151,7 @@ def extract_pstree_features(jsondump):
     return features
 
 
-def extract_psscan_features(jsondump):
+def extract_psscan_features(jsondump, **kwargs):
     df = pd.read_json(jsondump)
     keys = [
         'psscan.nEntries',           'psscan.nUniquePIDs',        'psscan.nUniqueNames',
@@ -1570,7 +1570,7 @@ def extract_sessions_features(jsondump):
     return features
 
 
-def extract_scheduleduled_tasks_features(jsondump):
+def extract_scheduled_tasks_features(jsondump):
     df = pd.read_json(jsondump)
     now = pd.Timestamp.utcnow()
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging, os, subprocess
-import importlib, time, sys, re
-from typing import Optional, List, Union
+import importlib, time, sys, re, threading
+from typing import Optional, List, Union, Dict, Sequence
 from pathlib import Path
 from shutil import which
 
@@ -19,13 +19,18 @@ class VolRunner:
                  offline: bool = False,
                  extra_args: Optional[List[str]] = None):
         self._vol_hint = vol_path
-        self.vol_path = self._vol_cmd()
+        # Resolved once. The lookup can end in an rglob over $HOME, which is far
+        # too expensive to repeat for every plugin we launch.
+        self.vol_path = self.resolve_volatility_command(vol_path)
         self.default_renderer = default_renderer
         self.default_timeout_s = default_timeout_s
         self.symbol_dirs = self._normalize_symbol_dirs(symbol_dirs)
         self.offline = offline
         self.extra_args = list(extra_args or [])
         self.version = None
+        self._catalogue: Optional[List[str]] = None
+        self._resolved: Dict[str, Optional[str]] = {}
+        self._catalogue_lock = threading.Lock()
 
     @staticmethod
     def _normalize_symbol_dirs(symbol_dirs: Optional[Union[str, List[str]]]) -> List[str]:
@@ -56,18 +61,14 @@ class VolRunner:
         return args
 
 
-    def _vol_cmd(self) -> str:
-        return self.resolve_volatility_command(self._vol_hint)
-    
     def build_command(self, image_path: str, renderer: str, plugin: str) -> List[str]:
-        vol = self.resolve_volatility_command(self._vol_hint)
         # Every option here is global and must come before the plugin name.
-        return vol + self.global_args() + ["-f", image_path, f"-r={renderer}", plugin]
+        return list(self.vol_path) + self.global_args() + ["-f", image_path, f"-r={renderer}", plugin]
 
     def run_plugin(self, memory_dump_path: str, plugin_specs: PluginSpec,
                     *, renderer: Optional[str] = None, output_dir: Optional[str] = None) -> PluginRunResult:
         """Invoke a single plugin with the chosen renderer; persist stdout to a file."""
-        plugin = plugin_specs.fqname
+        plugin = self.plugin_argument(plugin_specs)
         renderer = (renderer or plugin_specs.renderer or self.default_renderer).lower()
         ext = renderer_to_ext(renderer)
         outdir = output_dir or self._default_outdir(memory_dump_path)
@@ -107,7 +108,7 @@ class VolRunner:
             if not self.version:
                 self.version = self._parse_version(stderr_text)
             with open(err_path, "w", encoding="utf-8") as ef:
-                ef.write(stderr_text)
+                ef.write(self._condense_stderr(stderr_text))
         else:
             err_path = None
 
@@ -121,6 +122,36 @@ class VolRunner:
         logger.info("Finished %s rc=%s in %.2fs", plugin_specs.name, rc, runtime)
         return PluginRunResult(rc=rc, runtime_s=runtime, output_path=out_path, stderr_path=err_path,
                             meta={"cmd": cmd, "renderer": renderer})
+
+    @staticmethod
+    def _condense_stderr(text: str) -> str:
+        """Keep the diagnostics, drop the progress animation.
+
+        Volatility redraws a "Progress: NN.NN <phase>" line on stderr thousands of
+        times a second, each terminated with a carriage return so a terminal
+        overwrites it in place. Written to a file none of that is overwritten, and
+        a single plugin on a large image leaves a 10 MB .stderr.txt that is almost
+        entirely one repeated line. Keeping the last update per phase preserves
+        how far the plugin actually got without the flipbook.
+        """
+        kept: List[str] = []
+        last_phase = None
+        for chunk in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = chunk.rstrip()
+            if not line:
+                continue
+            if line.startswith("Progress:"):
+                # "Progress:   12.34\t\tScanning primary2" -> phase is the tail.
+                phase = line.split("\t")[-1].strip()
+                if phase == last_phase:
+                    kept[-1] = line          # same phase, newer percentage
+                else:
+                    kept.append(line)
+                    last_phase = phase
+                continue
+            last_phase = None
+            kept.append(line)
+        return "\n".join(kept) + "\n"
 
     @staticmethod
     def _explain_failure(stderr_text: str, err_path: Optional[str]) -> str:
@@ -139,21 +170,79 @@ class VolRunner:
             return f"See {err_path} for Volatility's output."
         return "No stderr was captured."
 
-    def list_plugins(self) -> List[str]:
-        """Parse vol.py -h output to get available plugins (best-effort)."""
-        try:
-            # print(self.vol_path) 
-            cmd = self.resolve_volatility_command() + ["-h"]
-            proc = subprocess.run(cmd,capture_output=True, text=True, check=True)
-            plugins = []
-            for line in proc.stdout.splitlines():
-                s = line.strip()
-                if s.startswith("windows."):
-                    plugins.append(s.split()[0])
-            return sorted(set(plugins))
-        except Exception as e:
-            logger.warning("Could not list plugins: %s", e)
-            return []
+    def list_plugins(self, refresh: bool = False) -> List[str]:
+        """Fully-qualified plugin names this Volatility install actually offers.
+
+        Parsed from ``vol -h`` and cached: it is the only way to know what the
+        installed version calls things, and every plugin we resolve consults it.
+        Best-effort by design -- an empty list means "we could not ask", and
+        callers must fall back to the configured name rather than refuse to run.
+        """
+        with self._catalogue_lock:
+            if self._catalogue is not None and not refresh:
+                return self._catalogue
+            try:
+                cmd = list(self.vol_path) + ["-h"]
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                plugins = []
+                for line in proc.stdout.splitlines():
+                    s = line.strip()
+                    if s.startswith(("windows.", "linux.", "mac.")):
+                        plugins.append(s.split()[0])
+                self._catalogue = sorted(set(plugins))
+            except Exception as e:
+                logger.warning("Could not list plugins: %s", e)
+                self._catalogue = []
+            return self._catalogue
+
+    def resolve_plugin(self, name: str, candidates: Sequence[str] = ()) -> Optional[str]:
+        """Map one of our short names onto a name this Volatility will accept.
+
+        Volatility matches what you type by *substring* against its full plugin
+        names, so ``windows.pslist`` finds ``windows.pslist.PsList``. That is
+        forgiving right up until it is not: ``windows.windows`` matches both
+        ``windows.windows.Windows`` and ``windows.windowstations.WindowStations``
+        and is rejected as ambiguous, and anything relocated under
+        ``windows.malware.*`` stops matching once its compatibility shim is
+        removed. So we look the name up rather than assume it.
+
+        Returns None when this install has no such plugin, which is a fact worth
+        reporting up front instead of discovering it one failed run at a time.
+        """
+        key = (name or "").lower()
+        if key in self._resolved:
+            return self._resolved[key]
+
+        catalogue = self.list_plugins()
+        resolved = self._match_plugin(key, candidates, catalogue)
+        self._resolved[key] = resolved
+        return resolved
+
+    @staticmethod
+    def _match_plugin(name: str, candidates: Sequence[str], catalogue: Sequence[str]) -> Optional[str]:
+        if not catalogue:
+            # We could not ask Volatility what it has. Prefer the most current
+            # name we know of and let the run itself report a mismatch.
+            return candidates[0] if candidates else name
+        lookup = {c.lower(): c for c in catalogue}
+
+        if name in lookup:
+            return lookup[name]
+        for cand in candidates:
+            hit = lookup.get(cand.lower())
+            if hit:
+                return hit
+
+        matches = [full for low, full in lookup.items() if name in low]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.debug("%r is ambiguous in this Volatility (%s)", name, ", ".join(sorted(matches)))
+        return None
+
+    def plugin_argument(self, spec) -> str:
+        """The name to pass to Volatility for `spec`, resolved where possible."""
+        return self.resolve_plugin(spec.name, getattr(spec, "candidates", ())) or spec.fqname
 
     def _default_outdir(self, memory_dump_path: str) -> str:
         base = os.path.dirname(os.path.abspath(memory_dump_path))

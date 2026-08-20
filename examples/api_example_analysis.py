@@ -24,6 +24,8 @@ summary = analysis.run_steps(
     steps=[0, 1, 2, 3, 6],   # bearings, processes, injections, network, report
     use_cache=True,
     high_level=False,
+    concurrency=4,     # plugins overlap; each starts when its own inputs are ready
+    deep=False,        # True also runs psxview, which dominates the wall clock
 )
 
 # print("[+] Summary keys:", ", ".join(sorted(summary.keys())))

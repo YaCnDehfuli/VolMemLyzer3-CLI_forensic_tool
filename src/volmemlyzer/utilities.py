@@ -197,11 +197,7 @@ def not_system_path(raw: str) -> bool:
     """
 
     def _expand_envs(s: str) -> str:
-        def repl(m):
-            var = m.group(1)
-            return os.environ.get(var, m.group(0))
-        s2 = re.sub(r"%([^%/\\]+)%", repl, s)
-        return os.path.expandvars(s2)
+        return expand_windows_envs(s)
 
     def _strip_device_prefix(s: str) -> str:
         if s.startswith("\\\\?\\") or s.startswith("\\\\??\\"):
@@ -267,7 +263,7 @@ def not_system_path(raw: str) -> bool:
     if not raw:
         return False
 
-    s0 = _clean(str(raw))
+    s0 = _clean(normalize_nt_path(str(raw)))
     s1 = _expand_envs(s0)
     token = _first_pathlike_token(s1)
     if not token:
@@ -288,21 +284,23 @@ def not_system_path(raw: str) -> bool:
     m = re.match(r"^([a-z]:)\\", tok_lower)
     drive = (m.group(1) if m else "").lower()
 
-    sysdrive = os.environ.get("SystemDrive", "c:").lower()
-    windir   = _expand_envs(os.environ.get("WINDIR", os.environ.get("SystemRoot", sysdrive + "\\Windows")))
-    windir   = ntpath.normpath(_clean(windir)).lower()
+    def _root(key: str) -> str:
+        return ntpath.normpath(_clean(WINDOWS_ENV[key])).lower()
+
+    sysdrive = WINDOWS_ENV["systemdrive"].lower()
+    windir   = _root("windir")
 
     # Program Files roots (cover WOW64):
-    pf_env   = ntpath.normpath(_clean(_expand_envs(os.environ.get("ProgramFiles", sysdrive + "\\Program Files")))).lower()
-    pf_w6432 = ntpath.normpath(_clean(_expand_envs(os.environ.get("ProgramW6432", sysdrive + "\\Program Files")))).lower()
-    pfx86    = ntpath.normpath(_clean(_expand_envs(os.environ.get("ProgramFiles(x86)", sysdrive + "\\Program Files (x86)")))).lower()
+    pf_env   = _root("programfiles")
+    pf_w6432 = _root("programw6432")
+    pfx86    = _root("programfiles(x86)")
 
     # Common Program Files roots:
-    cpf_env   = ntpath.normpath(_clean(_expand_envs(os.environ.get("CommonProgramFiles", pf_env + "\\Common Files")))).lower()
-    cpf_w6432 = ntpath.normpath(_clean(_expand_envs(os.environ.get("CommonProgramW6432", pf_w6432 + "\\Common Files")))).lower()
-    cpf_x86   = ntpath.normpath(_clean(_expand_envs(os.environ.get("CommonProgramFiles(x86)", pfx86 + "\\Common Files")))).lower()
+    cpf_env   = _root("commonprogramfiles")
+    cpf_w6432 = _root("commonprogramw6432")
+    cpf_x86   = _root("commonprogramfiles(x86)")
 
-    pdata   = ntpath.normpath(_clean(_expand_envs(os.environ.get("ProgramData", sysdrive + "\\ProgramData")))).lower()
+    pdata   = _root("programdata")
 
     # Canonical system subroots
     sys32   = ntpath.join(windir, "system32").lower()
@@ -457,10 +455,7 @@ def canonical_path_key(raw: str) -> str:
     if not raw:
         return ""
     s = str(raw).strip().strip('"').strip("'").replace("/", "\\")
-    # expand %ENV% and $VAR
-    def repl(m): return os.environ.get(m.group(1), m.group(0))
-    s = re.sub(r"%([^%/\\]+)%", repl, s)
-    s = os.path.expandvars(s)
+    s = expand_windows_envs(normalize_nt_path(s))
     # strip \\?\ or \\??\
     if s.startswith("\\\\?\\") or s.startswith("\\\\??\\"):
         s = s[4:]
@@ -477,29 +472,149 @@ def canonical_path_key(raw: str) -> str:
 
 
 
+# Windows locations, as the *image* understands them.
+#
+# Resolved from a fixed table rather than from os.environ, because the
+# environment we run in belongs to the analyst's machine, not to the memory
+# image. On macOS or Linux there is no %windir% to look up, so "%windir%\system32"
+# -- which is how Windows writes the action of most of its own scheduled tasks --
+# stayed literal, failed every trusted-prefix test, and was reported as a
+# non-system path. That one bug produced most of the persistence findings on a
+# clean machine, and made the verdict depend on which OS the analysis ran from.
+WINDOWS_ENV = {
+    "systemdrive": "C:",
+    "windir": "C:\\Windows",
+    "systemroot": "C:\\Windows",
+    "programfiles": "C:\\Program Files",
+    "programw6432": "C:\\Program Files",
+    "programfiles(x86)": "C:\\Program Files (x86)",
+    "commonprogramfiles": "C:\\Program Files\\Common Files",
+    "commonprogramw6432": "C:\\Program Files\\Common Files",
+    "commonprogramfiles(x86)": "C:\\Program Files (x86)\\Common Files",
+    "programdata": "C:\\ProgramData",
+    "allusersprofile": "C:\\ProgramData",
+    "public": "C:\\Users\\Public",
+    # User-scoped variables keep a placeholder profile name: we cannot know whose
+    # task it was, and the placeholder still lands the path in the right bucket.
+    "userprofile": "C:\\Users\\user",
+    "homepath": "C:\\Users\\user",
+    "localappdata": "C:\\Users\\user\\AppData\\Local",
+    "appdata": "C:\\Users\\user\\AppData\\Roaming",
+    "temp": "C:\\Users\\user\\AppData\\Local\\Temp",
+    "tmp": "C:\\Users\\user\\AppData\\Local\\Temp",
+}
+
+
+def expand_windows_envs(s: str) -> str:
+    """Expand %VAR% against the image's Windows layout, never the host's."""
+    def repl(m):
+        return WINDOWS_ENV.get(m.group(1).lower(), m.group(0))
+    return re.sub(r"%([^%/\\]+)%", repl, s or "")
+
+
+# Matches the "C:\Users\<someone>\" prefix so the rest of the path can be tested.
+_USER_PROFILE_RE = re.compile(r"^[a-z]:\\users\\[^\\]+\\")
+
+# Per-user locations where ordinary software genuinely installs itself. Anything
+# under here is not interesting on its own; plenty of well-known applications ship
+# to AppData by design and flagging the lot buries the rows that matter.
+USER_INSTALL_SUBDIRS = (
+    "appdata\\local\\programs\\",
+    "appdata\\local\\microsoft\\",
+    "appdata\\local\\google\\",
+    "appdata\\local\\discord\\",
+    "appdata\\local\\slack\\",
+    "appdata\\local\\postman\\",
+    "appdata\\local\\jetbrains\\",
+)
+
+# Directories that are user-writable and are not where installed software lives.
+# This is the tuning surface for path-based scoring: widen it to surface more,
+# narrow it to surface less.
+SUSPICIOUS_DIRS = (
+    "\\temp\\",
+    "\\tmp\\",
+    "\\downloads\\",
+    "\\desktop\\",
+    "\\users\\public\\",
+    "\\$recycle.bin\\",
+    "\\perflogs\\",
+    "\\appdata\\roaming\\",
+    "\\appdata\\local\\temp\\",
+)
+
+
+def normalize_nt_path(path: str) -> str:
+    r"""Rewrite kernel-style path forms into the ordinary drive-letter form.
+
+    Volatility reports paths as the kernel holds them, so a real image carries
+    ``\SystemRoot\System32\smss.exe`` and ``\Device\HarddiskVolume2\Windows\...``
+    alongside ordinary ``C:\Windows\...`` strings. Left alone the first two match
+    no trusted prefix and read as non-system, so smss.exe came out of a clean
+    image as a system binary running from somewhere it should not be.
+    """
+    if not path:
+        return ""
+    p = str(path).strip().strip('"').strip("'").replace("/", "\\")
+    low = p.lower()
+
+    # \??\C:\... and \\?\C:\... are prefixes on an otherwise normal path.
+    for prefix in ("\\\\??\\", "\\??\\", "\\\\?\\"):
+        if low.startswith(prefix.lower()):
+            p = p[len(prefix):]
+            low = p.lower()
+            break
+
+    if low.startswith("\\systemroot\\"):
+        return WINDOWS_ENV["windir"] + p[len("\\systemroot"):]
+    if low == "\\systemroot":
+        return WINDOWS_ENV["windir"]
+
+    # \Device\HarddiskVolumeN\rest -> C:\rest. Which volume carries which letter is
+    # not recoverable from the path alone; the system drive is the useful guess.
+    m = re.match(r"^\\device\\harddiskvolume\d+\\", low)
+    if m:
+        return WINDOWS_ENV["systemdrive"] + "\\" + p[m.end():]
+
+    return p
+
+
+def in_user_install_dir(path: str) -> bool:
+    """Is this one of the per-user roots where ordinary software installs itself?
+
+    Not a system path, but not interesting either: OneDrive, Teams, VS Code and
+    friends legitimately live under a user's AppData, and an auto-start task
+    pointing at one of them is the product working as designed.
+    """
+    if not path:
+        return False
+    p = expand_windows_envs(normalize_nt_path(path)).lower()
+    m = _USER_PROFILE_RE.match(p)
+    return bool(m) and p[m.end():].startswith(USER_INSTALL_SUBDIRS)
+
+
 def is_suspicious_path(path: str) -> bool:
+    """Is this path user-writable and not somewhere software normally installs?
+
+    Note the previous implementation sliced with ``path_l[len(user_dir_regex):]``,
+    taking the *length of the regex source* as an offset into the path, so the
+    per-user allow-list never matched anything it was meant to. Everything then
+    fell through to a list containing a bare "\\appdata\\", which flagged every
+    process belonging to any application installed under AppData.
     """
-    Check if the path is suspicious. A path is suspicious if it is user-writable 
-    and doesn't belong to legitimate system or common application directories.
-    """
-    path_l = path.replace("/", "\\").lower()
-     
-    user_dir_regex = r"c:\\users\\[^\\]+\\"
-    user_paths = [
-        "c:\\users\\",  # All user directories
-        "c:\\users\\public\\",  # Public user directory
-        "c:\\users\\appdata\\local\\programs\\",  # Common app installation paths
-        "c:\\users\\appdata\\local\\microsoft\\",]  # Microsoft user app locations
+    if not path:
+        return False
+
+    path_l = expand_windows_envs(normalize_nt_path(path)).lower()
 
     if not not_system_path(path):
         return False
-    
-    if any(re.match(user_dir_regex, path_l) and path_l[len(user_dir_regex):].startswith(subdir.lower()) for subdir in user_paths):
-        return False  
-    
-    else:
-        suspicious_paths = ["\\temp\\", "\\public\\", "\\downloads\\", "\\appdata\\", "\\workspace\\", "\\desktop\\"]
-        return any(s in path_l for s in suspicious_paths)
+
+    m = _USER_PROFILE_RE.match(path_l)
+    if m and path_l[m.end():].startswith(USER_INSTALL_SUBDIRS):
+        return False
+
+    return any(s in path_l for s in SUSPICIOUS_DIRS)
 
 
 def get_depth(children):
