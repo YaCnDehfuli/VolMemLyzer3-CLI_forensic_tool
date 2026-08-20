@@ -384,3 +384,84 @@ def test_the_host_environment_cannot_change_the_verdict(monkeypatch):
                        ("SystemDrive", "E:"), ("ProgramFiles", "E:\\Program Files")]:
         monkeypatch.setenv(var, value)
     assert not_system_path("%windir%\\system32\\rundll32.exe") == before
+
+
+# --------------------------------------------------------------------------
+# malfind, against the nine regions a real Windows 10 image produced
+#
+# All nine are PAGE_EXECUTE_READWRITE and private, so the region's attributes
+# alone cannot separate them -- every one scores identically on protection. What
+# separates them is what the bytes do.
+# --------------------------------------------------------------------------
+
+RWX = {"Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1, "CommitCharge": 1}
+
+# PID 2580, malware.exe: push ebp / mov ebp,esp / pusha, push fs + pop ds, the
+# PEB->Ldr walk (8b 40 0c, 8b 70 1c, 8b 46 08, 8b 7e 20), then a pushed API hash.
+SHELLCODE = bytes.fromhex(
+    "558bec81c4e8feffff6083ec04832424001e0fa01f33c040d1e040c1e0048b001f"
+    "8b400c8b701c33c98b46088b7e208b3666394f1875f268b2f2e2f46832749100")
+
+# PID 5292, SearchHost.exe: mov rax,imm64 / jmp rax trampolines with cc padding.
+JIT_TRAMPOLINE = bytes.fromhex(
+    "48b80000001 09a01000048ffe0cccccc48b80010001 09a01000048ffe0cccccc"
+    .replace(" ", "") + "48b80078011 09a01000048ffe0cccccc48b80030001 09a01000048ffe0cccccc"
+    .replace(" ", ""))
+
+# PID 5292, SearchHost.exe: an ordinary x64 prologue spilling its arguments.
+JIT_METHOD = bytes.fromhex(
+    "4889542410 48894c2408 4c89442418 4c894c2420 488b4128 488b4808 488b5150"
+    .replace(" ", "") + "4883e2f8 488bca 48b86000787da2010000 482bc8 4881f9700f0000 7609 48c7c1"
+    .replace(" ", ""))
+
+# PID 5292, SearchHost.exe: relative jump thunks separated by cc padding.
+JIT_THUNKS = bytes.fromhex(
+    "e9fbff3a000000000 0cccccccccccccc".replace(" ", "") * 2)
+
+# PID 3768, powershell.exe: a table of heap pointers, not code at all.
+POINTER_TABLE = bytes.fromhex(
+    "000000000000000010773a28690200001 0773a2869020000".replace(" ", "") +
+    "00003a2869020000b00dd02969020000".ljust(32, "0"))
+
+
+def _region(data: bytes, **over):
+    row = dict(RWX, Hexdump=hexdump(data))
+    row.update(over)
+    return row
+
+
+def test_the_shellcode_region_surfaces(eng):
+    score, flags, _ = eng._score_injections(_region(SHELLCODE, CommitCharge=2))
+    assert score >= eng._threshold("malfind")
+    assert eng._risk_from_score(score) in {"High", "Critical"}
+    assert "LDRWALK" in flags and "SEG" in flags
+
+
+@pytest.mark.parametrize("data,label", [
+    (JIT_TRAMPOLINE, "mov rax,imm64 / jmp rax trampolines"),
+    (JIT_METHOD, "an ordinary x64 prologue"),
+    (JIT_THUNKS, "relative jump thunks"),
+    (POINTER_TABLE, "a table of heap pointers"),
+])
+def test_ordinary_private_executable_regions_do_not_surface(eng, data, label):
+    """A JIT engine produces these by the dozen in every browser and .NET host."""
+    score, _, _ = eng._score_injections(_region(data))
+    assert score < eng._threshold("malfind"), f"{label} scored {score}"
+
+
+def test_the_protection_flags_alone_never_reach_the_threshold(eng):
+    """Otherwise every malfind row surfaces, since malfind only reports these."""
+    score, _, _ = eng._score_injections(_region(b"\x33\xc0" + b"\x90" * 4 + b"\x11" * 58))
+    assert score < eng._threshold("malfind")
+
+
+def test_a_peb_walk_needs_more_than_one_field_access(eng):
+    """Compiled code reaches structure fields the same way; one is meaningless."""
+    assert eng._peb_walk(bytes.fromhex("8b400c") + b"\x00" * 32) is False
+    assert eng._peb_walk(bytes.fromhex("8b400c") + bytes.fromhex("8b701c")) is True
+
+
+def test_small_pushed_constants_are_not_read_as_hashes(eng):
+    """push 0x10, push 0x100 -- lengths and flags, mostly zero bytes."""
+    assert eng._api_hashing(bytes.fromhex("6810000000") * 3) == 0
+    assert eng._api_hashing(bytes.fromhex("68b2f2e2f4")) == 1
