@@ -1,4 +1,4 @@
-# VolMemLyzer
+# VolMemLyzer3
 
 Volatility 3 CLI for parallel plugin runs, feature extraction, and stepwise DFIR triage.
 
