@@ -10,3 +10,8 @@ build/
 *.egg-info/
 .pytest_cache/
 .cache/
+.DS_Store
+benchmarks/work/
+benchmarks/work_ci/
+benchmarks/ci_results.json
+benchmarks/ci_results.md

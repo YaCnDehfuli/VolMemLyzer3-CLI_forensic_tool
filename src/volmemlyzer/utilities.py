@@ -115,6 +115,16 @@ def to_builtin(obj):
             return obj.item()
     except ImportError:
         pass
+    if obj is pd.NaT:
+        return None
+    if isinstance(obj, pd.Timestamp):
+        return None if pd.isna(obj) else obj.isoformat()
+    if isinstance(obj, pd.Timedelta):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: to_builtin(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_builtin(v) for v in obj]
     return obj
 
 def load_json_records(path: str):
@@ -812,8 +822,15 @@ def write_csv(filename: str, row: dict) -> None:
 #     return os.path.abspath(csv_path)
 
 
+def _json_default(obj):
+    converted = to_builtin(obj)
+    if converted is not obj:
+        return converted
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def write_json(path: str, obj) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
+        json.dump(obj, f, indent=2, ensure_ascii=False, default=_json_default)
 
