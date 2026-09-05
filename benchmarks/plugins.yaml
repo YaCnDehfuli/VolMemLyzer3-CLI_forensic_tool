@@ -2,13 +2,14 @@
 # Canonical copy lives in benchmarks/run_benchmark.py as PINNED_PLUGINS.
 # A different list is a different measurement — do not silently expand it.
 #
-# Included (registered names only):
-#   pslist, pstree, psscan, dlllist, cmdline, netscan, registry.hivelist,
-#   modules, svcscan, getsids, privileges, envars
+# Included (registered names that finish in minutes on the 4.4GB image):
+#   pslist, pstree, dlllist, cmdline, registry.hivelist, modules, svcscan,
+#   getsids, privileges, envars
 #
-# Requested but not in PLUGIN_SPECIFICS (CLI --plugins rejects it):
-#   sessions  — extract_sessions_features exists; the plugin is not registered
-#   hivelist  — registered as registry.hivelist
+# Requested but excluded:
+#   sessions           — extract_sessions_features exists; not in PLUGIN_SPECIFICS
+#   hivelist           — registered as registry.hivelist (included under that name)
+#   psscan, netscan    — timed out at 480s on 2580_5.vmem with empty artifacts
 #
 # Excluded: byte-walk / dump / pool-wide / full-image plugins
 #   yarascan, strings, memmap, virtmap, dumpfiles, procdump, memdump,
@@ -23,10 +24,8 @@
 plugins:
   - pslist
   - pstree
-  - psscan
   - dlllist
   - cmdline
-  - netscan
   - registry.hivelist
   - modules
   - svcscan

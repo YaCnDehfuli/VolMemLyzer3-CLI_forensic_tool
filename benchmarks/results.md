@@ -1,6 +1,6 @@
 # VolMemLyzer extract benchmark
 
-Extracting `11` plugins from a `4412228315`-byte Windows image takes `90.81`s serially and `30.06`s with `4` workers — a `3.0×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
+Extracting `10` plugins from a `4412228315`-byte Windows image takes `172.16`s serially and `71.12`s with `4` workers — a `2.4×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
 
 ## Method
 
@@ -10,7 +10,7 @@ Cache-warm is a timed re-run against artifacts from a completed populate.
 Each configuration is three runs. Summary is median with min/max of successful runs.
 The local image is not redistributed.
 
-- Plugins (11): `info, pslist, pstree, cmdline, modules, envars, getsids, privileges, registry.hivelist, registry.userassist, scheduled_tasks`
+- Plugins (10): `pslist, pstree, dlllist, cmdline, registry.hivelist, modules, svcscan, getsids, privileges, envars`
 - Extractor functions in tree: `72`
 - Registered plugins: `56`
 - Volatility 3: `2.28.0`
@@ -23,14 +23,14 @@ The local image is not redistributed.
 
 | config | workers | cache | n ok | median | min | max |
 |---|---:|---|---:|---:|---:|---:|
-| serial | 1 | off | 3 | 90.81 | 87.16 | 123.96 |
-| parallel | 4 | off | 3 | 30.06 | 30.02 | 32.21 |
-| cache-warm | 4 | on | 3 | 1.4265 | 1.4220 | 1.4309 |
+| serial | 1 | off | 3 | 172.16 | 166.57 | 173.79 |
+| parallel | 4 | off | 3 | 71.12 | 69.49 | 73.50 |
+| cache-warm | 4 | on | 3 | 3.1517 | 3.1483 | 3.4141 |
 
 ## Peak RSS (bytes)
 
 | config | median | min | max |
 |---|---:|---:|---:|
-| serial | 200589312 | 199884800 | 201408512 |
-| parallel | 503681024 | 498274304 | 510971904 |
-| cache-warm | 106688512 | 106278912 | 107880448 |
+| serial | 305246208 | 304570368 | 306839552 |
+| parallel | 613306368 | 612306944 | 616222720 |
+| cache-warm | 110272512 | 110198784 | 111624192 |
