@@ -1,23 +1,33 @@
 # VolMemLyzer
 
+Volatility 3 CLI for parallel plugin runs, feature extraction, and stepwise DFIR triage.
+
 [![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+[![CI](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/actions/workflows/ci.yml/badge.svg)](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Volatility](https://img.shields.io/badge/Volatility-3.x-black)
 [![Release](https://img.shields.io/github/v/release/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool)](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases)
 
-VolMemLyzer is a memory-forensics toolkit built around Volatility 3. It provides a command-line interface and Python API for repeatable plugin execution, feature extraction, and analyst-oriented DFIR triage.
+## Results
 
-## Capabilities
+Extracting `11` plugins from a `4412228315`-byte Windows image takes `90.81`s serially and `30.06`s with `4` workers — a `3.0×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
 
-- Run Volatility 3 plugins concurrently with configurable timeouts and renderers.
-- Reuse cached artifacts and convert compatible output formats when possible.
-- Extract stable, flat features to CSV or JSON for research and machine-learning workflows.
-- Analyze system context, processes, possible code injection, network activity, and persistence indicators.
-- Process a single memory image or a directory of images.
+![VolMemLyzer CLI help](examples/VolMemLyzer.png)
 
-The complete feature schema is documented in [FEATURES.md](FEATURES.md). 
+**Stable tool.** 72 extractor functions. Three workflows: `analyze`, `run`, and `extract`. Not an EDR.
 
-![VolMemLyzer-v3 CLI Help Page (Published to PyPI : `https://pypi.org/project/volmemlyzer/`)](examples/VolMemLyzer.png)
+## Quickstart
+
+```bash
+git clone https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool.git
+cd VolMemLyzer3-CLI_forensic_tool
+python -m pip install -e .
+volmemlyzer --help
+volmemlyzer analyze -i /cases/host.vmem
+volmemlyzer extract -i /cases/host.vmem -f json
+```
+
+The published wheel is `volmemlyzer==3.0.1` (`pip install volmemlyzer`). A clean checkout of this tree is the source of the measured figure above.
 
 ## Requirements
 
@@ -25,54 +35,6 @@ The complete feature schema is documented in [FEATURES.md](FEATURES.md).
 - A supported Volatility 3 installation
 
 VolMemLyzer resolves Volatility in this order: an explicit `--vol-path` or `VOL_PATH` value, the installed `volatility3` Python module, the `vol` command on `PATH`, and common local `vol.py` locations.
-
-## Installation
-
-Clone the V3 development repository and install the package:
-
-```bash
-git clone https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool.git
-cd VolMemLyzer3-CLI_forensic_tool
-python -m pip install -e .
-```
-
-Confirm that the CLI is available:
-
-```bash
-volmemlyzer --help
-```
-
-## Quick start
-
-Analyze a memory image with the default workflow:
-
-```bash
-volmemlyzer analyze -i /cases/host.vmem
-```
-
-Run selected Volatility plugins:
-
-```bash
-volmemlyzer run -i /cases/host.vmem --plugins pslist,pstree,psscan
-```
-
-Extract features from one image:
-
-```bash
-volmemlyzer extract -i /cases/host.vmem -f csv
-```
-
-Extract features recursively from a directory:
-
-```bash
-volmemlyzer extract -i /cases -f json
-```
-
-List registered extractors and available Volatility plugins:
-
-```bash
-volmemlyzer list
-```
 
 ## CLI reference
 
@@ -94,6 +56,8 @@ Plugin names are resolved against the Volatility you actually have installed, so
 relocations such as `windows.malfind` moving to `windows.malware.malfind` are
 handled without changes here. `volmemlyzer list --registry` prints the resolved
 name for every extractor and flags anything your build does not provide.
+
+The complete feature schema is documented in [FEATURES.md](FEATURES.md).
 
 ### `analyze`
 
@@ -206,6 +170,15 @@ New integrations should use the packaged `volmemlyzer` command.
 - If an artifact cannot be written, confirm that `--outdir` names a writable directory.
 - Quote paths that contain spaces, especially on Windows.
 - If a cached artifact cannot be converted to the requested format, VolMemLyzer reruns the plugin with the selected renderer.
+
+## Limitations
+
+The README figure is wall-clock of `volmemlyzer extract` on the pinned
+plugin list in `benchmarks/plugins.yaml`, not the full registry and not an
+end-to-end case. Physical-layer scanners are excluded from that list. Serial and parallel runs disable the artifact cache; cache-warm
+is reported separately. Different images, Volatility builds, worker counts, and
+hosts will not reproduce the same seconds. Risk bands in `analyze` are review
+signals, not detections. The tool does not monitor endpoints and is not an EDR.
 
 ## Citation
 

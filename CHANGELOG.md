@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Extract-parallelism benchmark (`benchmarks/`) with serial, parallel, and cache-warm
+  configurations, raw `results.json`, and a CI stub job that fails on harness drift.
+- GitHub Actions workflow for unit tests and the stub benchmark.
+
+### Fixed
+
+- `extract -f json` no longer fails when a feature is a pandas `Timestamp`
+  (`info.SystemTime` and similar).
+
 ## [3.0.1] - 2026-09-05
 
 GitHub snapshot aligned with the published PyPI package `volmemlyzer==3.0.1`.

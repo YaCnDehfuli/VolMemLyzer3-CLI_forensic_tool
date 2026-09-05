@@ -1,0 +1,35 @@
+# Pinned plugin set for the extract-parallelism benchmark.
+# Canonical copy lives in benchmarks/run_benchmark.py as PINNED_PLUGINS.
+# A different list is a different measurement — do not silently expand it.
+#
+# Included (registered names only):
+#   pslist, pstree, psscan, dlllist, cmdline, netscan, registry.hivelist,
+#   modules, svcscan, getsids, privileges, envars
+#
+# Requested but not in PLUGIN_SPECIFICS (CLI --plugins rejects it):
+#   sessions  — extract_sessions_features exists; the plugin is not registered
+#   hivelist  — registered as registry.hivelist
+#
+# Excluded: byte-walk / dump / pool-wide / full-image plugins
+#   yarascan, strings, memmap, virtmap, dumpfiles, procdump, memdump,
+#   imagecopy, malfind, filescan, poolscanner, bigpools
+# and similar full-walk / heavy scanners:
+#   handles, iat, vadinfo, verinfo, psxview, threads, thrdscan, deskscan,
+#   mbrscan, shimcache, statistics, vadwalk, devicetree, driverscan,
+#   modscan, mutantscan, registry.hivescan, symlinkscan, ldrmodules
+#
+# Not on the requested list (also excluded):
+#   info, registry.userassist, scheduled_tasks
+plugins:
+  - pslist
+  - pstree
+  - psscan
+  - dlllist
+  - cmdline
+  - netscan
+  - registry.hivelist
+  - modules
+  - svcscan
+  - getsids
+  - privileges
+  - envars

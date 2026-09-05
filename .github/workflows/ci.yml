@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e . pytest
+      - run: python -m pytest tests -q
+
+  benchmark:
+    # Stub image + stub vol.py. Fails if the extract harness regresses:
+    # missing runs, serial slower than the committed ceiling, parallel
+    # slower than serial, or cache-warm no longer cheaper than a cold run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e . pytest
+      - name: what is being run
+        run: |
+          echo "commit:  $(git rev-parse HEAD)"
+          echo "subject: $(git log -1 --format=%s)"
+          python -c "from importlib.metadata import version; print('volmemlyzer', version('volmemlyzer'))"
+      - name: stub extract benchmark must stay inside committed thresholds
+        run: >
+          python benchmarks/run_benchmark.py
+          --ci --check --runs 3 --jobs 2 --clean-work
+          --timeout 60
