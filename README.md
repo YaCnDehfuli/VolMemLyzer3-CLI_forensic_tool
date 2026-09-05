@@ -3,6 +3,7 @@
 [![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Volatility](https://img.shields.io/badge/Volatility-3.x-black)
+[![Release](https://img.shields.io/github/v/release/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool)](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases)
 
 VolMemLyzer is a memory-forensics toolkit built around Volatility 3. It provides a command-line interface and Python API for repeatable plugin execution, feature extraction, and analyst-oriented DFIR triage.
 
