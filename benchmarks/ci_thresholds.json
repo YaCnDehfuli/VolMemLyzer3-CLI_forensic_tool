@@ -1,6 +1,6 @@
 {
   "min_runs_per_config": 3,
-  "plugin_count": 12,
+  "plugin_count": 10,
   "max_serial_median_s": 90.0,
   "max_parallel_over_serial": 1.25,
   "max_cache_warm_over_serial": 0.5,

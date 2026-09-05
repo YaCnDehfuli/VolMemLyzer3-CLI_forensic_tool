@@ -11,6 +11,8 @@ build/
 .pytest_cache/
 .cache/
 .DS_Store
+*.vmem
+*.raw
 benchmarks/work/
 benchmarks/work_ci/
 benchmarks/ci_results.json

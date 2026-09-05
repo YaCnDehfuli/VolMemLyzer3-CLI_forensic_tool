@@ -41,15 +41,15 @@ DEFAULT_STUB_VOL = HERE / "fixtures" / "vol.py"
 CONFIRMED_SHA256 = "777d71d7106e5ded19592c075058da12049bfcd658221e70f0579ad4bbd9cff4"
 CONFIRMED_SIZE = 4412228315
 
-# Requested triage set that exists in PLUGIN_SPECIFICS. sessions is not
-# registered. Byte-walk / dump / pool-wide scanners are not in this list.
+# Requested triage set that exists in PLUGIN_SPECIFICS and finishes in minutes
+# on the confirmed 4.4GB image. sessions is not registered. psscan and netscan
+# timed out at 480s with empty artifacts. Byte-walk / dump / pool-wide
+# scanners are not in this list.
 PINNED_PLUGINS = [
     "pslist",
     "pstree",
-    "psscan",
     "dlllist",
     "cmdline",
-    "netscan",
     "registry.hivelist",
     "modules",
     "svcscan",

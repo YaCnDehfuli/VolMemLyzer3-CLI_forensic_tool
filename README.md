@@ -10,7 +10,7 @@ Volatility 3 CLI for parallel plugin runs, feature extraction, and stepwise DFIR
 
 ## Results
 
-Extracting `11` plugins from a `4412228315`-byte Windows image takes `90.81`s serially and `30.06`s with `4` workers — a `3.0×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
+Extracting `10` plugins from a `4412228315`-byte Windows image takes `172.16`s serially and `71.12`s with `4` workers — a `2.4×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
 
 ![VolMemLyzer CLI help](examples/VolMemLyzer.png)
 
@@ -175,7 +175,9 @@ New integrations should use the packaged `volmemlyzer` command.
 
 The README figure is wall-clock of `volmemlyzer extract` on the pinned
 plugin list in `benchmarks/plugins.yaml`, not the full registry and not an
-end-to-end case. Physical-layer scanners are excluded from that list. Serial and parallel runs disable the artifact cache; cache-warm
+end-to-end case. Byte-walk, dump, and pool-wide scanners are excluded;
+`psscan` and `netscan` timed out on this image and are not in the list.
+Serial and parallel runs disable the artifact cache; cache-warm
 is reported separately. Different images, Volatility builds, worker counts, and
 hosts will not reproduce the same seconds. Risk bands in `analyze` are review
 signals, not detections. The tool does not monitor endpoints and is not an EDR.

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-05T18:00:55Z",
+  "generated_at": "2026-09-05T18:44:10Z",
   "mode": "hardware",
   "image": {
     "path": "/Users/yacn/Data/Portfolio files/REPOS/MemTriage/Samples/2580_5.vmem",
@@ -27,19 +27,18 @@
     "extractor_functions": 72
   },
   "plugins": [
-    "info",
     "pslist",
     "pstree",
+    "dlllist",
     "cmdline",
+    "registry.hivelist",
     "modules",
-    "envars",
+    "svcscan",
     "getsids",
     "privileges",
-    "registry.hivelist",
-    "registry.userassist",
-    "scheduled_tasks"
+    "envars"
   ],
-  "plugin_count": 11,
+  "plugin_count": 10,
   "plugins_file": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/plugins.yaml",
   "serial_jobs": 1,
   "parallel_jobs": 4,
@@ -57,9 +56,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/serial/run_1",
         "ok": true,
         "returncode": 0,
-        "wall_s": 123.96051949099638,
-        "peak_rss_bytes": 200589312,
-        "plugin_count": 11,
+        "wall_s": 172.1622934829793,
+        "peak_rss_bytes": 305246208,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -79,7 +78,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       },
@@ -91,9 +90,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/serial/run_2",
         "ok": true,
         "returncode": 0,
-        "wall_s": 87.15788944996893,
-        "peak_rss_bytes": 199884800,
-        "plugin_count": 11,
+        "wall_s": 173.7857600330026,
+        "peak_rss_bytes": 306839552,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -113,7 +112,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       },
@@ -125,9 +124,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/serial/run_3",
         "ok": true,
         "returncode": 0,
-        "wall_s": 90.81211817800067,
-        "peak_rss_bytes": 201408512,
-        "plugin_count": 11,
+        "wall_s": 166.5707306659897,
+        "peak_rss_bytes": 304570368,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -147,7 +146,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       }
@@ -161,9 +160,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/parallel/run_1",
         "ok": true,
         "returncode": 0,
-        "wall_s": 32.21084916399559,
-        "peak_rss_bytes": 503681024,
-        "plugin_count": 11,
+        "wall_s": 71.11514601198724,
+        "peak_rss_bytes": 612306944,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -183,7 +182,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       },
@@ -195,9 +194,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/parallel/run_2",
         "ok": true,
         "returncode": 0,
-        "wall_s": 30.05802604497876,
-        "peak_rss_bytes": 498274304,
-        "plugin_count": 11,
+        "wall_s": 73.50292782002361,
+        "peak_rss_bytes": 613306368,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -217,7 +216,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       },
@@ -229,9 +228,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/parallel/run_3",
         "ok": true,
         "returncode": 0,
-        "wall_s": 30.018354346975684,
-        "peak_rss_bytes": 510971904,
-        "plugin_count": 11,
+        "wall_s": 69.48845079698367,
+        "peak_rss_bytes": 616222720,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -251,7 +250,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks",
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars",
           "--no-cache"
         ]
       }
@@ -265,9 +264,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/cache_warm/store",
         "ok": true,
         "returncode": 0,
-        "wall_s": 1.4309398820041679,
-        "peak_rss_bytes": 106278912,
-        "plugin_count": 11,
+        "wall_s": 3.4140995129710063,
+        "peak_rss_bytes": 110272512,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -287,7 +286,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks"
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars"
         ]
       },
       {
@@ -298,9 +297,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/cache_warm/store",
         "ok": true,
         "returncode": 0,
-        "wall_s": 1.426486165029928,
-        "peak_rss_bytes": 106688512,
-        "plugin_count": 11,
+        "wall_s": 3.1482868409948424,
+        "peak_rss_bytes": 110198784,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -320,7 +319,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks"
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars"
         ]
       },
       {
@@ -331,9 +330,9 @@
         "outdir": "/Users/yacn/Data/Portfolio files/REPOS/VolMemLyzer/benchmarks/work/cache_warm/store",
         "ok": true,
         "returncode": 0,
-        "wall_s": 1.421977305028122,
-        "peak_rss_bytes": 107880448,
-        "plugin_count": 11,
+        "wall_s": 3.151729339035228,
+        "peak_rss_bytes": 111624192,
+        "plugin_count": 10,
         "extractor_count": 72,
         "command": [
           "/Users/yacn/Data/Portfolio files/volatility_workspace/volatility3/VolMemLyzer/.venv/bin/python",
@@ -353,7 +352,7 @@
           "--format",
           "json",
           "--plugins",
-          "info,pslist,pstree,cmdline,modules,envars,getsids,privileges,registry.hivelist,registry.userassist,scheduled_tasks"
+          "pslist,pstree,dlllist,cmdline,registry.hivelist,modules,svcscan,getsids,privileges,envars"
         ]
       }
     ]
@@ -363,48 +362,48 @@
       "n_ok": 3,
       "n_failed": 0,
       "wall_s": {
-        "median": 90.81211817800067,
-        "min": 87.15788944996893,
-        "max": 123.96051949099638,
+        "median": 172.1622934829793,
+        "min": 166.5707306659897,
+        "max": 173.7857600330026,
         "n": 3
       },
       "peak_rss_bytes": {
-        "median": 200589312,
-        "min": 199884800,
-        "max": 201408512
+        "median": 305246208,
+        "min": 304570368,
+        "max": 306839552
       }
     },
     "parallel": {
       "n_ok": 3,
       "n_failed": 0,
       "wall_s": {
-        "median": 30.05802604497876,
-        "min": 30.018354346975684,
-        "max": 32.21084916399559,
+        "median": 71.11514601198724,
+        "min": 69.48845079698367,
+        "max": 73.50292782002361,
         "n": 3
       },
       "peak_rss_bytes": {
-        "median": 503681024,
-        "min": 498274304,
-        "max": 510971904
+        "median": 613306368,
+        "min": 612306944,
+        "max": 616222720
       }
     },
     "cache_warm": {
       "n_ok": 3,
       "n_failed": 0,
       "wall_s": {
-        "median": 1.426486165029928,
-        "min": 1.421977305028122,
-        "max": 1.4309398820041679,
+        "median": 3.151729339035228,
+        "min": 3.1482868409948424,
+        "max": 3.4140995129710063,
         "n": 3
       },
       "peak_rss_bytes": {
-        "median": 106688512,
-        "min": 106278912,
-        "max": 107880448
+        "median": 110272512,
+        "min": 110198784,
+        "max": 111624192
       }
     }
   },
-  "wall_clock_reduction_x": 3.02122694424809,
-  "readme_sentence": "Extracting `11` plugins from a `4412228315`-byte Windows image takes `90.81`s serially and `30.06`s with `4` workers \u2014 a `3.0\u00d7` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`."
+  "wall_clock_reduction_x": 2.420894888607266,
+  "readme_sentence": "Extracting `10` plugins from a `4412228315`-byte Windows image takes `172.16`s serially and `71.12`s with `4` workers \u2014 a `2.4\u00d7` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`."
 }

@@ -15,10 +15,8 @@ import time
 CATALOGUE = [
     "windows.pslist.PsList",
     "windows.pstree.PsTree",
-    "windows.psscan.PsScan",
     "windows.dlllist.DllList",
     "windows.cmdline.CmdLine",
-    "windows.netscan.NetScan",
     "windows.registry.hivelist.HiveList",
     "windows.modules.Modules",
     "windows.svcscan.SvcScan",
