@@ -10,11 +10,24 @@ Volatility 3 CLI for parallel plugin runs, feature extraction, and stepwise DFIR
 
 ## Results
 
-Extracting `10` plugins from a `4412228315`-byte Windows image takes `172.16`s serially and `71.12`s with `4` workers — a `2.4×` reduction in wall-clock. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`. Full method and raw results in `benchmarks/`.
+`volmemlyzer extract` of 10 plugins from `benchmarks/plugins.yaml` — `pslist`, `pstree`, `dlllist`, `cmdline`, `registry.hivelist`, `modules`, `svcscan`, `getsids`, `privileges`, `envars` — on a `4412228315`-byte Windows image (SHA-256 `777d71d7106e5ded19592c075058da12049bfcd658221e70f0579ad4bbd9cff4`, not redistributed):
 
-![VolMemLyzer CLI help](examples/VolMemLyzer.png)
+| config | workers | cache | median | range |
+|---|---:|---|---:|---|
+| serial | 1 | off | 172.16s | 166.57–173.79 |
+| parallel | 4 | off | 71.12s | 69.49–73.50 |
+| cache-warm | 4 | on | 3.1517s | 3.1483–3.4141 |
 
-**Stable tool.** 72 extractor functions. Three workflows: `analyze`, `run`, and `extract`. Not an EDR.
+Parallel vs serial is `2.4×` (`172.16/71.12`). Cache-warm is artifact reuse, not a Volatility speedup. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`, Volatility 3 `2.28.0`. The tree has 72 extractor functions, 56 registered plugins, and 3 workflows (`analyze`, `run`, `extract`). Method and raw results: `benchmarks/`.
+
+<p align="center">
+  <img src="docs/figures/extract-wall-clock.svg" alt="Extract wall-clock: serial 172.16s, parallel 71.12s, cache-warm 3.1517s" width="100%">
+</p>
+<sub>Median wall-clock of <code>volmemlyzer extract</code> on the pinned 10-plugin set. Serial and parallel use <code>--no-cache</code>. Cache-warm is artifact reuse, not a Volatility speedup. Regenerated from <code>benchmarks/results.json</code>.</sub>
+
+**Stable tool.** Not an EDR, antivirus, or live endpoint monitor.
+
+[MemTriage](https://github.com/YaCnDehfuli/MemTriage) consumes this extract layer. [VADViT](https://github.com/YaCnDehfuli/VADViT) is the model MemTriage runs after extraction. VolMemLyzer does not classify malware.
 
 ## Quickstart
 
@@ -142,6 +155,11 @@ volmemlyzer list --vol --grep process
 ```
 
 Run `volmemlyzer <command> --help` for the complete option list.
+
+<p align="center">
+  <img src="examples/VolMemLyzer.png" alt="VolMemLyzer CLI help" width="100%">
+</p>
+<sub>CLI help for <code>analyze</code>, <code>run</code>, <code>extract</code>, and <code>list</code>.</sub>
 
 ## Legacy compatibility command
 
