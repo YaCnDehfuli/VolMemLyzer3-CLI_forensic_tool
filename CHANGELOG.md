@@ -13,6 +13,11 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   configurations, raw `results.json`, and a CI stub job that fails on harness drift.
 - GitHub Actions workflow for unit tests and the stub benchmark.
 
+### Changed
+
+- README first screen now shows the three-config extract wall-clock figure
+  generated from `benchmarks/results.json`.
+
 ### Fixed
 
 - `extract -f json` no longer fails when a feature is a pandas `Timestamp`

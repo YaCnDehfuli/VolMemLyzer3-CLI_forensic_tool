@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="420" viewBox="0 0 880 420" role="img" aria-label="volmemlyzer extract wall-clock for serial, parallel, and cache-warm">
+<rect x="0" y="0" width="880" height="420" fill="#7d8289"/>
+<text x="440.0" y="28" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f3efe6">volmemlyzer extract wall-clock (median of 3 runs)</text>
+<text x="440.0" y="48" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="12" fill="#e4ddd0">cache-warm is artifact reuse, not a Volatility speedup</text>
+<line x1="72" y1="64" x2="72" y2="332" stroke="#5a6570" stroke-width="1.4"/>
+<line x1="72" y1="332" x2="852" y2="332" stroke="#5a6570" stroke-width="1.4"/>
+<line x1="66" y1="332.0" x2="72" y2="332.0" stroke="#5a6570" stroke-width="1.2"/>
+<text x="62" y="336.0" text-anchor="end" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">0</text>
+<line x1="66" y1="198.0" x2="72" y2="198.0" stroke="#5a6570" stroke-width="1.2"/>
+<text x="62" y="202.0" text-anchor="end" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">96.41</text>
+<line x1="66" y1="64.0" x2="72" y2="64.0" stroke="#5a6570" stroke-width="1.2"/>
+<text x="62" y="68.0" text-anchor="end" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">192.82</text>
+<text x="18" y="198.0" text-anchor="middle" transform="rotate(-90 18 198.0)" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">seconds</text>
+<rect x="72.0" y="92.7" width="236.0" height="239.3" rx="6" ry="6" fill="#4f6574" stroke="#2f3a42" stroke-width="1.2"/>
+<text x="190.0" y="84.7" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f3efe6">172.16s</text>
+<text x="190.0" y="354.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="12" fill="#f3efe6">serial · workers=1</text>
+<text x="190.0" y="372.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">166.57–173.79</text>
+<rect x="344.0" y="233.2" width="236.0" height="98.8" rx="6" ry="6" fill="#4f6d62" stroke="#2f3a42" stroke-width="1.2"/>
+<text x="462.0" y="225.2" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f3efe6">71.12s</text>
+<text x="462.0" y="354.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="12" fill="#f3efe6">parallel · workers=4</text>
+<text x="462.0" y="372.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">69.49–73.50</text>
+<rect x="616.0" y="327.6" width="236.0" height="4.4" rx="6" ry="6" fill="#6a5a4a" stroke="#2f3a42" stroke-width="1.2"/>
+<text x="734.0" y="319.6" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#f3efe6">3.1517s</text>
+<text x="734.0" y="354.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="12" fill="#f3efe6">cache-warm · workers=4</text>
+<text x="734.0" y="372.0" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">3.1483–3.4141</text>
+<text x="440.0" y="402" text-anchor="middle" font-family="ui-sans-serif, Helvetica, Arial, sans-serif" font-size="11" fill="#e4ddd0">image 4412228315 bytes · 10 plugins · Volatility 3 2.28.0</text>
+</svg>
