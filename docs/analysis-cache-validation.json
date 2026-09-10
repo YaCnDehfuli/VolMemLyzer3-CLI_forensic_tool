@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "analysis_commit": "working-tree",
+  "analysis_commit": "e8903c1eae5647cfcd80730a3c826c380a9722a8",
   "method": "Direct invocation of OverviewAnalysis pure scorers over cached JSON; no UI and no Volatility rerun.",
   "captures": [
     {
