@@ -30,22 +30,6 @@
         "userassist_location_only_before": 7,
         "userassist_location_only_after": 0
       }
-    },
-    {
-      "label": "2196.vmem cache",
-      "quick_image_hash": "quicksha256:dfd7c9ca18344e5db0a7974197a767b9303455eb4c295dfad8fdd83e3bfd3353",
-      "surfaces": [
-        {"name": "process", "input_objects": 141, "surfaced": 0},
-        {"name": "malfind", "input_objects": 12, "surfaced": 0},
-        {"name": "netscan", "input_objects": null, "surfaced": null},
-        {"name": "scheduled_tasks", "input_objects": null, "surfaced": null},
-        {"name": "userassist", "input_objects": null, "surfaced": null},
-        {"name": "ssdt", "input_objects": 965, "surfaced": 0}
-      ],
-      "cache_limitations": [
-        "svcscan, cmdline, ldrmodules, privileges, callbacks, driverirp and IAT artifacts were zero-byte failed outputs.",
-        "A missing or failed artifact is reported as unavailable, never as a clean result."
-      ]
     }
   ],
   "preserved_test_vectors": [
@@ -65,10 +49,6 @@
     "2580_5.vmem_malfind.json": "c7e6a56cd615e2c983cf79e6026e92c0f544342a0ef171587358880037a34ce7",
     "2580_5.vmem_netscan.json": "4ab1f2d64af0eca2c68656ab67a6c22b69560b2085eb83b64589890bb4f3d091",
     "2580_5.vmem_scheduled_tasks.json": "bfcdf7e690565e4eecec3aa5ede4e5be423bd400501e3c8006133a706cf78c68",
-    "2580_5.vmem_registry_userassist.json": "ac7b06128f6cc8e549b5c57ca7d242eb751824f8d1223730bdfde02bef04bf5f",
-    "2196.vmem_pslist.json": "17bb9ddb7fc88af9bbb6cd2bc7c83bb463781ee529b895c78f4f2a93ac85d1d3",
-    "2196.vmem_pstree.json": "5303908c56b2b843afd607c63468e1f5da5587f6bb09d7af677f1b8fb0ac692f",
-    "2196.vmem_malfind.json": "4975e607d1b554b7f32bfbbc0016389e6ebd46933de5bb20f939a4581405dfb6",
-    "2196.vmem_ssdt.json": "1cac68cc72e9da553de7617265aefb8e15672cb16f54cfd198628c9c6e94f9be"
+    "2580_5.vmem_registry_userassist.json": "ac7b06128f6cc8e549b5c57ca7d242eb751824f8d1223730bdfde02bef04bf5f"
   }
 }
