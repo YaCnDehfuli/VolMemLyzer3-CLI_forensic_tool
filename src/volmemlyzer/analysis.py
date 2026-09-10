@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple, Iterable
-import ipaddress, os, copy, re
+import ipaddress, ntpath, os, copy, re
 from .extractors import extract_winInfo_features
 from .utilities import load_records_any, not_system_path, cheap_image_hash, canonical_path_key, in_user_install_dir
 from .utilities import char_entropy, is_non_ascii, is_suspicious_path, write_json
@@ -25,6 +25,12 @@ class OverviewAnalysis:
     # These surface signal for an analyst to look at. They are not detections and
     # carry no notion of malicious; a Critical row means "several things about this
     # are unusual at once", not "this is malware".
+    # This is a bounded ordinal evidence score, not a probability or a claim that
+    # an artifact is malicious. Each scorer keeps only the strongest observation
+    # from a hypothesis family (identity, location, lineage, and so on), then sums
+    # independent families. That prevents one underlying fact from being counted
+    # repeatedly under several correlated rules.
+    MAX_RISK_SCORE = 30
     RISK_BANDS = (("Critical", 20), ("High", 14), ("Medium", 9), ("Low", 0))
 
     # Lowest band a row may occupy and still be shown, by name.
@@ -57,17 +63,23 @@ class OverviewAnalysis:
 
     # Which plugins each step reads. Used to collect everything the requested
     # steps need into one scheduled run, before any step starts interpreting.
+    # Quick mode deliberately avoids plugins that pool-scan physical memory.
+    # Those plugins are valuable cross-checks but can take orders of magnitude
+    # longer than structure-walking plugins, so they are explicit --deep work.
     STEP_PLUGINS = {
         0: ("info",),
-        1: ("pslist", "pstree", "psscan"),
+        1: ("pslist", "pstree"),
         2: ("malfind",),
-        3: ("netscan",),
-        4: ("registry.hivelist", "registry.hivescan", "scheduled_tasks", "registry.userassist"),
+        3: (),
+        4: ("registry.hivelist", "scheduled_tasks", "registry.userassist"),
     }
-    # psxview re-runs psscan, thrdscan and a csrss handle sweep internally, so it
-    # costs more than the rest of step 1 put together for evidence that largely
-    # duplicates psscan. Opt in with --deep when you want the cross-check.
-    DEEP_PLUGINS = {1: ("psxview",)}
+    # psscan, netscan and hivescan are pool scanners. psxview also invokes psscan,
+    # thrdscan and a csrss handle sweep. Keep all four behind one clear boundary.
+    DEEP_PLUGINS = {
+        1: ("psscan", "psxview"),
+        3: ("netscan",),
+        4: ("registry.hivescan",),
+    }
 
     def run_steps(
         self,
@@ -91,7 +103,12 @@ class OverviewAnalysis:
             TerminalUI.note(f"Showing {self._min_risk} risk and above.")
         artifacts_dir = artifacts_dir or pipe._default_artifacts_dir(image_path)
         results: Dict[str, Any] = {"image": os.path.basename(image_path),
-                                   "quick_hash": cheap_image_hash(image_path)}
+                                   "quick_hash": cheap_image_hash(image_path),
+                                   "scoring": {
+                                       "kind": "bounded ordinal evidence",
+                                       "maximum": self.MAX_RISK_SCORE,
+                                       "not_a_probability": True,
+                                   }}
         wanted = list(steps) if steps is not None else [0, 1, 2, 3, 4]
         self._prefetch(pipe, image_path, artifacts_dir, wanted, use_cache, concurrency, deep)
 
@@ -108,10 +125,12 @@ class OverviewAnalysis:
                 results["step2"] = self.step2_injections(pipe, image_path, artifacts_dir, use_cache, high_level)
                 executed.append(2)
             elif s == 3:
-                results["step3"] = self.step3_network(pipe, image_path, artifacts_dir, use_cache, high_level)
+                results["step3"] = self.step3_network(pipe, image_path, artifacts_dir, use_cache,
+                                                      high_level, deep=deep)
                 executed.append(3)
             elif s == 4:
-                results["step4"] = self.step4_persistence(pipe, image_path, artifacts_dir, use_cache, high_level)
+                results["step4"] = self.step4_persistence(pipe, image_path, artifacts_dir, use_cache,
+                                                          high_level, deep=deep)
                 executed.append(4)            
         results["executed_steps"] = executed
         return results
@@ -151,9 +170,15 @@ class OverviewAnalysis:
     # ---------------- Step 0 ----------------
     def step0_bearings(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool) -> Dict[str, Any]:
         TerminalUI.section("Step 0 · Hygiene & bearings")
-        info_path = self._ensure_one(pipe, image_path, artifacts_dir, "info", use_cache)
-        with open(info_path, 'r', encoding='utf-8') as f:
-            _, res = extract_winInfo_features(f)
+        try:
+            info_path = self._ensure_one(pipe, image_path, artifacts_dir, "info", use_cache)
+            if not info_path or not os.path.isfile(info_path) or os.path.getsize(info_path) == 0:
+                raise ValueError("windows.info produced no usable artifact")
+            with open(info_path, 'r', encoding='utf-8') as f:
+                _, res = extract_winInfo_features(f)
+        except Exception as exc:
+            TerminalUI.note(f"windows.info unavailable; continuing without bearings ({exc}).")
+            return {"ok": False, "error": str(exc)}
 
         win = f"Windows {res.get('info.NtMajorVersion')} version {res.get('info.winBuild')}"
         arch = "64-bit" if res.get("info.Is64") else "32-bit"
@@ -169,7 +194,7 @@ class OverviewAnalysis:
     # ---------------- Step 1 ----------------
     def step1_processes(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool,
                         high_level: bool, concurrency: int = 1, deep: bool = False) -> Dict[str, Any]:
-        enabled = ["pslist", "pstree", "psscan"] + (["psxview"] if deep else [])
+        enabled = ["pslist", "pstree"] + (["psscan", "psxview"] if deep else [])
         TerminalUI.section(f"Step 1 · Process census ({'/'.join(enabled)})")
 
         out_path = {n: p for n, p in self._prefetched.items() if n in enabled}
@@ -182,7 +207,7 @@ class OverviewAnalysis:
        
         pslist  = load_records_any(out_path.get("pslist"))
         pstree  = load_records_any(out_path.get("pstree"))
-        psscan  = load_records_any(out_path.get("psscan"))
+        psscan  = load_records_any(out_path.get("psscan")) if deep else None
         psxview = load_records_any(out_path.get("psxview")) if deep else None
     
         census = self._build_census(pslist, pstree)
@@ -193,9 +218,12 @@ class OverviewAnalysis:
 
         TerminalUI.kv([
             ("pslist processes", summary.get("pslist_count")),
-            ("psscan processes", summary.get("psscan_count")),
-            ("psscan-only, no exit time (hidden)", summary.get("hidden_count")),
-            ("psscan-only, exited (ordinary churn)", summary.get("terminated_count")),
+            ("psscan processes", summary.get("psscan_count")
+             if summary.get("psscan_count") is not None else "not checked (use --deep)"),
+            ("psscan-only, no exit time (hidden)", summary.get("hidden_count")
+             if summary.get("hidden_count") is not None else "not checked (use --deep)"),
+            ("psscan-only, exited (ordinary churn)", summary.get("terminated_count")
+             if summary.get("terminated_count") is not None else "not checked (use --deep)"),
             ("orphans (ppid missing)", summary.get("orphans")),
             ("processes with a resolved path", summary.get("with_path")),
             # None, not 0: psxview was not run, so this is unknown rather than clean.
@@ -222,14 +250,17 @@ class OverviewAnalysis:
         mal_path = self._ensure_one(pipe, image_path, artifacts_dir, "malfind", use_cache)
         rows = load_records_any(mal_path)
 
-        suspicious_regions = {}
+        # A virtual address is only unique inside a process. Volatility renderers
+        # can also repeat a row, so use (PID, address) and keep the strongest copy;
+        # never add duplicate scores together.
+        suspicious_regions: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
         for row in rows:
             score, flags, rationale = self._score_injections(row)
 
             if score >= self._threshold("malfind"):
                 start_vpn = row.get("Start VPN")
-                if start_vpn not in suspicious_regions:
-                    suspicious_regions[start_vpn] = {
+                region_key = (row.get("PID"), start_vpn)
+                finding = {
                         "process": row.get("Process"),
                         "pid": row.get("PID"),
                         "vad_tag": row.get("Tag", ""),
@@ -239,26 +270,27 @@ class OverviewAnalysis:
                         "disasm": row.get("Disasm"),
                         "hex_dump": row.get("Hexdump"),
                         "score": score,
+                        "score_max": self.MAX_RISK_SCORE,
+                        "risk": self._risk_from_score(score),
                         "flags": flags,
                         "rationale": rationale
-                    }
-                else:
-                    suspicious_regions[start_vpn]["score"] += score
-                    suspicious_regions[start_vpn]["flags"] += ", " + flags
-                    suspicious_regions[start_vpn]["rationale"] += " | " + rationale
+                }
+                previous = suspicious_regions.get(region_key)
+                if previous is None or score > int(previous.get("score", 0)):
+                    suspicious_regions[region_key] = finding
 
         rows_to_display = [
             [
-                str(pid),
+                str(row["pid"]),
                 row["process"],
                 str(row["commit_charge"]),
-                str(row["pid"]),
+                str(start_vpn),
                 str(row["vad_tag"]),
                 str(row["notes"]),
                 int(row["score"]),
                 row["rationale"]
             ]
-            for pid, row in suspicious_regions.items()
+            for (_, start_vpn), row in suspicious_regions.items()
         ]
         
         # rows_to_display[]
@@ -273,8 +305,13 @@ class OverviewAnalysis:
     # ---------------- Step 3 · Networking (netscan deep, DFIR-backed) ----------------
 
 
-    def step3_network(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool, high_level: bool) -> Dict[str, Any]:
+    def step3_network(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool,
+                      high_level: bool, deep: bool = False) -> Dict[str, Any]:
         TerminalUI.section("Step 3 · Networking (netscan deep, DFIR-backed)")
+
+        if not deep:
+            TerminalUI.note("Skipped in quick mode; netscan pool-scans physical memory (use --deep).")
+            return {"ok": True, "skipped": True, "reason": "deep_only"}
 
         if not pipe.registry.has("netscan"):
             TerminalUI.note("netscan not registered; skipping deep view")
@@ -284,20 +321,31 @@ class OverviewAnalysis:
         rows = load_records_any(net_path) or []
 
         # ---------- light aggregations for context ----------
-        per_pid = {}
-        per_remote_pub = {}
+        per_pid: Dict[str, set] = {}
+        per_remote_pub: Dict[str, set] = {}
+        counted = set()
+        skip_states = {"CLOSED", "CLOSE_WAIT", "TIME_WAIT", "FIN_WAIT1", "FIN_WAIT2", "LAST_ACK"}
         for r in rows:
             pid = str(r.get("PID") or "")
             state = str(r.get("State") or "").upper()
             fa = str(r.get("ForeignAddr") or "")
-            fip = fa.split(":")[0].strip() if fa else ""
+            fip = self._ip_from_endpoint(fa)
+            proto = str(r.get("Proto") or "").upper()
+            la = str(r.get("LocalAddr") or "")
+            try: lp_i = int(r.get("LocalPort") or 0)
+            except (TypeError, ValueError): lp_i = 0
+            try: fp_i = int(r.get("ForeignPort") or 0)
+            except (TypeError, ValueError): fp_i = 0
+            key = (pid, la, lp_i, fa, fp_i, proto, state)
+            if state in skip_states or key in counted:
+                continue
+            counted.add(key)
             if pid:
-                per_pid[pid] = per_pid.get(pid, 0) + 1
-            if state in {"ESTABLISHED", "SYN_SENT"} and fip and fip not in {"*", "0.0.0.0", "::"} and not self._is_private_ip(fip):
-                per_remote_pub[fip] = per_remote_pub.get(fip, 0) + 1
+                per_pid.setdefault(pid, set()).add(key)
+            if state in {"ESTABLISHED", "SYN_SENT"} and self._is_public_ip(fip):
+                per_remote_pub.setdefault(fip, set()).add(key)
 
         # ---------- score unique sockets ----------
-        skip_states = {"CLOSED", "CLOSE_WAIT", "TIME_WAIT", "FIN_WAIT1", "FIN_WAIT2", "LAST_ACK"}
         seen = set()
         suspicious: List[Dict[str, Any]] = []
 
@@ -317,16 +365,20 @@ class OverviewAnalysis:
             try: fp_i = int(fp)
             except: fp_i = 0
 
-            key = (la, lp_i, fa, fp_i, proto, state)
+            # PID is part of socket identity. Two processes can legitimately reuse
+            # the same endpoint tuple at different times in one memory image.
+            key = (pid, owner.lower(), la, lp_i, fa, fp_i, proto.upper(), state)
             if state in skip_states or key in seen:
                 continue
             seen.add(key)
 
-            row["_pid_conn_count"] = per_pid.get(str(pid or ""), 0)
-            fip = fa.split(":")[0].strip() if fa else ""
-            row["_same_remote_count"] = per_remote_pub.get(fip, 0)
+            scored_row = dict(row)
+            scored_row["_pid_conn_count"] = len(per_pid.get(str(pid or ""), ()))
+            fip = self._ip_from_endpoint(fa)
+            scored_row["_same_remote_count"] = len(per_remote_pub.get(fip, ()))
 
-            score, flags, rationale = self._score_network_connections(row, self._is_private_ip, self._is_loopback)
+            score, flags, rationale = self._score_network_connections(
+                scored_row, self._is_private_ip, self._is_loopback)
             if score >= self._threshold("netscan"):
                 suspicious.append({
                     "local_address": la,
@@ -338,6 +390,8 @@ class OverviewAnalysis:
                     "owner": owner or None,
                     "pid": pid,
                     "score": int(score),
+                    "score_max": self.MAX_RISK_SCORE,
+                    "risk": self._risk_from_score(score),
                     "flags": flags,
                     "rationale": rationale,
                 })
@@ -382,7 +436,8 @@ class OverviewAnalysis:
 
 
 
-    def step4_persistence(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool, high_level: bool) -> Dict[str, Any]:
+    def step4_persistence(self, pipe: Pipeline, image_path: str, artifacts_dir: str, use_cache: bool,
+                          high_level: bool, deep: bool = False) -> Dict[str, Any]:
         TerminalUI.section("Step 4 · Persistence & user activity (registry & tasks)")
         out: Dict[str, Any] = {}
         #Collecting *best* IoC per canonical key here to avoid duplicates.
@@ -395,6 +450,7 @@ class OverviewAnalysis:
                 "type": itype,
                 "indicator": indicator,
                 "score": int(score),
+                "score_max": self.MAX_RISK_SCORE,
                 "risk": self._risk_from_score(score),
                 "why": " | ".join([w for w in rationale if w]),
                 "source": source,
@@ -415,24 +471,20 @@ class OverviewAnalysis:
         if pipe.registry.has("registry.hivelist"):
             hl = load_records_any(self._ensure_one(pipe, image_path, artifacts_dir, "registry.hivelist", use_cache))
             out["hivelist"] = len(hl)
-        if pipe.registry.has("registry.hivescan"):
+        if deep and pipe.registry.has("registry.hivescan"):
             hs = load_records_any(self._ensure_one(pipe, image_path, artifacts_dir, "registry.hivescan", use_cache))
             out["hivescan"] = len(hs)
+        elif not deep:
+            out["hivescan"] = None
 
         if hl or hs:
             set_list = {int(x.get("Offset")) for x in hl if "Offset" in x}
             set_scan = {int(x.get("Offset")) for x in hs if "Offset" in x}
             missing = sorted(set_scan - set_list)
             out["orphaned"] = len(missing)
-            for off in missing:
-                add_or_update(
-                    key=f"hive:{off}",
-                    itype="registry.hive_orphan",
-                    indicator=f"Offset {off}",
-                    score=7,
-                    rationale=["Hive page present in scan but absent from hivelist"],
-                    source="registry.hivescan",
-                )
+            # Pool-scan-only hive pages are commonly stale allocations. Preserve
+            # the count as deep-mode context, but do not promote an uncorroborated
+            # carved page to an IOC.
 
         # --- Scheduled tasks (uses not_system_path in scorer; dedupe by name or action+args)
         if pipe.registry.has("scheduled_tasks"):
@@ -485,11 +537,12 @@ class OverviewAnalysis:
                 fcnt = int(r.get("Focus") or r.get("Focus Count") or 0)
 
                 s, why = self._score_userassist_name(name)
-                # small usage boost (bounded)
-                if cnt or fcnt:
-                    s += min(3, cnt // 5)
-                    if cnt:  why.append(f"Count={cnt}")
-                    if fcnt: why.append(f"Focus={fcnt}")
+                # Frequency is analyst context and a dedupe tie-break, not risk.
+                # Frequently launched software is usually *more* likely to be
+                # ordinary, and count-based points let a benign shortcut cross a
+                # threshold without any new suspicious property.
+                if cnt:  why.append(f"Count={cnt}")
+                if fcnt: why.append(f"Focus={fcnt}")
 
                 if s >= self._threshold("userassist") and self._seems_pathlike(name):
                     flagged += 1
@@ -542,8 +595,26 @@ class OverviewAnalysis:
     # The four discovery sources psxview cross-checks.
     PSXVIEW_SOURCES = ("pslist", "psscan", "thrdscan", "csrss")
 
-    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: List[dict], psxview: Optional[List[dict]]) -> Tuple[Dict[str, Any], List[Tuple]]:
+    @staticmethod
+    def _record_evidence(evidence: Dict[str, Tuple[int, str, str]], family: str,
+                         weight: int, flag: str, rationale: str) -> None:
+        """Keep the strongest observation that tests one investigative hypothesis."""
+        previous = evidence.get(family)
+        if previous is None or weight > previous[0]:
+            evidence[family] = (int(weight), flag, rationale)
+
+    @classmethod
+    def _finish_evidence(cls, evidence: Dict[str, Tuple[int, str, str]]) -> Tuple[int, List[str], List[str]]:
+        """Combine independent hypothesis families on a documented bounded scale."""
+        score = min(cls.MAX_RISK_SCORE, sum(item[0] for item in evidence.values()))
+        flags = [item[1] for item in evidence.values() if item[1]]
+        reasons = [item[2] for item in evidence.values() if item[2]]
+        return int(score), flags, reasons
+
+    def _score_processes(self, census: Dict[int, Dict[str, Any]], psscan: Optional[List[dict]],
+                         psxview: Optional[List[dict]]) -> Tuple[Dict[str, Any], List[Tuple]]:
         pid_set = set(census.keys())
+        psscan_ran = psscan is not None
         # Keep the exit time alongside the PID. A process found by pool scan but
         # absent from the linked list is usually just one that has exited and not
         # yet been reaped -- an image has dozens -- so treating every psscan-only
@@ -584,75 +655,94 @@ class OverviewAnalysis:
             path = (b.get("path") or "").strip()
             ppid = b.get("ppid")
             wow64 = b.get("wow64")
-            score = 0
-            flags: List[str] = []
-            reasons: List[str] = []
+            evidence: Dict[str, Tuple[int, str, str]] = {}
 
-            suspicious_path = bool(path) and is_suspicious_path(path)
+            try:
+                non_system_location = bool(path) and not_system_path(path)
+            except Exception:
+                non_system_location = False
+            try:
+                vendor_install = non_system_location and in_user_install_dir(path)
+            except Exception:
+                vendor_install = False
+            try:
+                explicit_suspicious = bool(path) and is_suspicious_path(path)
+            except Exception:
+                explicit_suspicious = False
+            # is_suspicious_path is intentionally narrow; add non-system roots
+            # (external drives, shares, user-writable locations) while de-noising
+            # conventional per-user vendor install directories.
+            suspicious_path = bool(path) and (
+                explicit_suspicious or (non_system_location and not vendor_install)
+            )
 
             # --- disagreement between discovery methods -----------------------
             if pid in psscan_pids and pid not in pid_set:
                 if psscan_exited.get(pid):
-                    score += 2; flags.append("TERM")
-                    reasons.append("Found by pool scan only, but it has an exit time: "
-                                   "a terminated process not yet reaped.")
+                    self._record_evidence(
+                        evidence, "discovery", 2, "TERM",
+                        "Found by pool scan only, but it has an exit time: "
+                        "a terminated process not yet reaped.")
                 else:
-                    score += 10; flags.append("HK")
-                    reasons.append("Found by pool scan (psscan) with no exit time, yet absent "
-                                   "from the EPROCESS list (pslist).")
+                    self._record_evidence(
+                        evidence, "discovery", 10, "HK",
+                        "Found by pool scan (psscan) with no exit time, yet absent "
+                        "from the EPROCESS list (pslist).")
             if pid in psx_false:
-                score += 8; flags.append("XV")
-                reasons.append(f"Missing from {len(psx_false[pid])} discovery sources (psxview): "
-                               f"{', '.join(psx_false[pid])}.")
+                self._record_evidence(
+                    evidence, "discovery", 8, "XV",
+                    f"Missing from {len(psx_false[pid])} discovery sources (psxview): "
+                    f"{', '.join(psx_false[pid])}.")
 
             # --- parent missing from the census (scored once) -----------------
             # This used to be scored twice by two rules testing the same condition,
             # so every orphan carried 12-14 points and a duplicated flag.
             if ppid is not None and ppid not in pid_set:
-                if suspicious_path:
-                    score += 8; flags.append("ZB+OP")
-                    reasons.append(f"Orphan process running from a user-writable path ({path}).")
-                else:
-                    score += 4; flags.append("ZB")
-                    reasons.append("Parent PID is not present in the census (orphan).")
+                self._record_evidence(
+                    evidence, "lineage", 4, "ZB",
+                    "Parent PID is not present in the census (orphan).")
 
             # --- where it is running from -------------------------------------
             if suspicious_path:
-                score += 6; flags.append("OP")
-                reasons.append(f"Executable in a user-writable, non-system path ({path}).")
+                self._record_evidence(
+                    evidence, "location", 7, "OP",
+                    f"Executable in a user-writable, non-system path ({path}).")
                 if wow64:
-                    score += 2; flags.append("WOW")
-                    reasons.append("32-bit executable on 64-bit Windows, from that same path.")
+                    self._record_evidence(
+                        evidence, "context", 2, "WOW",
+                        "32-bit executable on 64-bit Windows, from that same path.")
+            elif vendor_install:
+                self._record_evidence(
+                    evidence, "location", 2, "USERINSTALL",
+                    f"Executable in a conventional per-user install directory ({path}).")
 
             # --- what it is called --------------------------------------------
             if name:
                 lower = name.lower()
                 if lower in self.SYSTEM_BINARIES and path and not_system_path(path):
-                    score += 8; flags.append("IMP")
-                    reasons.append(f"Carries the name of a system binary but runs from {path}.")
+                    self._record_evidence(
+                        evidence, "identity", 8, "IMP",
+                        f"Carries the name of a system binary but runs from {path}.")
                 twin = self._lookalike_of(lower)
                 if twin:
-                    score += 8; flags.append("LOOK")
-                    reasons.append(f"Name is one character away from the system binary {twin}.")
+                    self._record_evidence(
+                        evidence, "identity", 8, "LOOK",
+                        f"Name is one character away from the system binary {twin}.")
                 if is_non_ascii(name):
-                    score += 4 if suspicious_path else 2
-                    flags.append("UNI")
-                    reasons.append("Process name contains non-ASCII characters.")
+                    self._record_evidence(
+                        evidence, "identity", 4 if suspicious_path else 2, "UNI",
+                        "Process name contains non-ASCII characters.")
 
             # --- parentage -----------------------------------------------------
             parent = (census.get(ppid, {}).get("name") or "").lower() if ppid else ""
             expected = self.EXPECTED_CHILDREN.get(parent)
             if expected is not None and name:
                 if name.lower() not in expected:
-                    # The old rule scored +8 whether or not the path was odd, and
-                    # printed the same "suspicious path" rationale either way, so
-                    # services.exe under wininit.exe was flagged on every image.
-                    if suspicious_path:
-                        score += 8; flags.append("WP+OP")
-                        reasons.append(f"Unexpected child of {parent}, running from {path}.")
-                    else:
-                        score += 4; flags.append("WP")
-                        reasons.append(f"Unexpected child of {parent}.")
+                    self._record_evidence(
+                        evidence, "lineage", 4, "WP",
+                        f"Unexpected child of {parent}.")
+
+            score, flags, reasons = self._finish_evidence(evidence)
 
             if score > 0 and pid is not None and pid not in emitted:
                 emitted.add(pid)
@@ -660,11 +750,13 @@ class OverviewAnalysis:
 
         summary = {
             "pslist_count": len(pid_set),
-            "psscan_count": len(psscan_pids),
-            "hidden_count": len([1 for pid in psscan_pids
-                                 if pid not in pid_set and not psscan_exited.get(pid)]),
-            "terminated_count": len([1 for pid in psscan_pids
-                                     if pid not in pid_set and psscan_exited.get(pid)]),
+            "psscan_count": len(psscan_pids) if psscan_ran else None,
+            "hidden_count": (len([1 for pid in psscan_pids
+                                  if pid not in pid_set and not psscan_exited.get(pid)])
+                             if psscan_ran else None),
+            "terminated_count": (len([1 for pid in psscan_pids
+                                      if pid not in pid_set and psscan_exited.get(pid)])
+                                 if psscan_ran else None),
             "orphans": len([1 for pid, b in census.items()
                             if b.get("ppid") is not None and b.get("ppid") not in pid_set]),
             "psxview_inconsistent": len(psx_false) if psxview_ran else None,
@@ -735,13 +827,11 @@ class OverviewAnalysis:
         The Hexdump column is always present and always the same shape, so that is
         what we read. Volatility gives us the first 64 bytes of the region.
         """
-        score = 0
-        flags: List[str] = []
-        why: List[str] = []
+        evidence: Dict[str, Tuple[int, str, str]] = {}
 
         data = self._hexdump_bytes(row.get("Hexdump"))
         prot = str(row.get("Protection") or "").upper()
-        private = self._as_int(row.get("PrivateMemory"))
+        private = self._as_bool(row.get("PrivateMemory"), default=False)
         commit = self._as_int(row.get("CommitCharge"))
 
         executable = "EXECUTE" in prot
@@ -750,45 +840,48 @@ class OverviewAnalysis:
         # An unbacked region that is writable and executable at once is the
         # classic shape of injected code; on its own it is still only a shape.
         if executable and writable and private == 1:
-            score += 8; flags.append("RWX")
-            why.append(f"Private region that is both writable and executable ({prot or 'unknown'})")
+            self._record_evidence(
+                evidence, "memory_shape", 8, "RWX",
+                f"Private region that is both writable and executable ({prot or 'unknown'})")
         elif executable and private == 1:
-            score += 4; flags.append("PRV")
-            why.append("Executable private region with no file backing")
+            self._record_evidence(
+                evidence, "memory_shape", 4, "PRV",
+                "Executable private region with no file backing")
 
         if data[:2] == b"MZ":
-            score += 8; flags.append("PE")
-            why.append("PE header at the start of a region that should not hold one")
+            self._record_evidence(
+                evidence, "payload", 8, "PE",
+                "PE header at the start of an unbacked executable region")
         if re.search(rb"\x90{8,}", data):
-            score += 6; flags.append("SLED")
-            why.append("NOP sled of 8 or more bytes")
+            self._record_evidence(evidence, "payload", 6, "SLED", "NOP sled of 8 or more bytes")
         if self._shellcode_prologue(data):
-            score += 6; flags.append("STUB")
-            why.append("Byte sequence matching a known shellcode prologue")
+            self._record_evidence(
+                evidence, "payload", 8, "STUB",
+                "Byte sequence matching a known shellcode prologue")
         if self._peb_access(data):
-            score += 4; flags.append("PEB")
-            why.append("Direct PEB/TEB access, typical of position-independent code")
+            self._record_evidence(
+                evidence, "loader_behavior", 4, "PEB",
+                "Direct PEB/TEB access, typical of position-independent code")
         if self._peb_walk(data):
-            score += 6; flags.append("LDRWALK")
-            why.append("Walks the PEB loader lists, the way code with no import table finds its imports")
-        # Volatility only hands us the first 64 bytes of the region, so two of
-        # these rarely fit in the window even when the code is full of them. One
-        # is weak on its own and scored as corroboration rather than a finding.
+            self._record_evidence(
+                evidence, "loader_behavior", 6, "LDRWALK",
+                "Walks the PEB loader lists, the way code with no import table finds its imports")
+        # One push-immediate is ordinary compiler output and does not test the API
+        # hashing hypothesis. Require repetition even within the 64-byte window.
         hashes = self._api_hashing(data)
         if hashes >= 2:
-            score += 6; flags.append("APIHASH")
-            why.append("Repeated push of hash-like constants, typical of resolving imports by hash")
-        elif hashes == 1:
-            score += 2; flags.append("APIHASH?")
-            why.append("Pushes a hash-like constant")
+            self._record_evidence(
+                evidence, "loader_behavior", 6, "APIHASH",
+                "Repeated push of hash-like constants, typical of resolving imports by hash")
         if self._segment_tricks(data):
-            score += 4; flags.append("SEG")
-            why.append("Segment register manipulation (push fs / pop ds)")
+            self._record_evidence(
+                evidence, "loader_behavior", 4, "SEG",
+                "Segment register manipulation (push fs / pop ds)")
 
         # Context, never enough on its own.
         if commit is not None and commit > 32:
-            score += 2; flags.append("BIGCOMMIT")
-            why.append(f"Large commit charge ({commit})")
+            self._record_evidence(
+                evidence, "size_context", 2, "BIGCOMMIT", f"Large commit charge ({commit})")
 
         # A region of nothing is not injected code, whatever its protection says.
         # Volatility reports plenty of these and they were previously scored as if
@@ -796,6 +889,7 @@ class OverviewAnalysis:
         if data and not data.strip(b"\x00"):
             return 0, "", "Region is entirely zero bytes"
 
+        score, flags, why = self._finish_evidence(evidence)
         return int(score), ", ".join(flags), " | ".join(why) if why else "—"
 
     @staticmethod
@@ -892,9 +986,7 @@ class OverviewAnalysis:
         """
         DFIR-backed scoring for netscan output
         """
-        score = 0
-        flags: List[str] = []
-        why: List[str] = []
+        evidence: Dict[str, Tuple[int, str, str]] = {}
 
         state = str(row.get("State") or "").upper()
         proto = str(row.get("Proto") or "")
@@ -910,9 +1002,9 @@ class OverviewAnalysis:
         try: fp_i = int(fp)
         except: fp_i = 0
 
-        lip = la.split(":")[0].strip() if la else ""
-        fip = fa.split(":")[0].strip() if fa else ""
-        public_remote = fip and not is_private_ip(fip)
+        lip = self._ip_from_endpoint(la)
+        fip = self._ip_from_endpoint(fa)
+        public_remote = self._is_public_ip(fip)
 
         conn_count = int(row.get("_pid_conn_count") or 0)
         same_remote_count = int(row.get("_same_remote_count") or 0)
@@ -933,38 +1025,54 @@ class OverviewAnalysis:
             # Major: listener exposure or unexpected listener by non-system
             if state in {"LISTENING", "LISTEN"}:
                 if lp_i in {3389, 445, 139} and owner_l not in system_owners:
-                    score += 12; flags += ["UnexpectedListener"]; why.append(f"{owner or 'Unknown'} listening on sensitive port {lp_i}")
+                    self._record_evidence(
+                        evidence, "listener", 8, "UnexpectedListener",
+                        f"{owner or 'Unknown'} listening on sensitive port {lp_i}")
                 # High ephemeral listener by non-system, not loopback
                 if lp_i >= 49152 and owner_l and owner_l not in system_owners and not is_loopback(lip):
-                    score += 10; flags += ["HighPortListener"]; why.append(f"High-port listener {lp_i} by {owner}")
+                    self._record_evidence(
+                        evidence, "listener", 6, "HighPortListener",
+                        f"High-port listener {lp_i} by {owner}")
 
             # Public ESTABLISHED with no PID (netscan orphan) – treat as major
             if state == "ESTABLISHED" and public_remote and (pid in (None, "", 0)):
-                score += 12; flags += ["PublicNoPID"]; why.append(f"Public ESTABLISHED with no PID to {fip}")
+                self._record_evidence(
+                    evidence, "attribution", 8, "PublicNoPID",
+                    f"Public ESTABLISHED with no PID to {fip}")
 
             # Outbound to admin/service ports on the public internet (workstations usually shouldn't)
             if state in {"ESTABLISHED", "SYN_SENT"} and public_remote and fp_i in {445, 3389, 23}:
-                score += 12; flags += ["AdminPortOutbound"]; why.append(f"Outbound to {fp_i} on public {fip}")
+                self._record_evidence(
+                    evidence, "remote_service", 8, "AdminPortOutbound",
+                    f"Outbound to {fp_i} on public {fip}")
 
             # LOLBIN outbound to public
             if state in {"ESTABLISHED", "SYN_SENT"} and public_remote and owner_l in lolbin_clients:
-                score += 10; flags += ["LOLBINOutbound"]; why.append(f"{owner} connecting to public {fip}")
+                self._record_evidence(
+                    evidence, "process_behavior", 8, "LOLBINOutbound",
+                    f"{owner} connecting to public {fip}")
 
             # Non-standard destination ports to public (MITRE T1571) vs uncommon-but-common set
             if state in {"ESTABLISHED", "SYN_SENT"} and public_remote and fp_i:
                 if fp_i in suspicious_ports:
-                    score += 10; flags += ["BadPort"]; why.append(f"Known suspicious dest port {fp_i}")
+                    self._record_evidence(
+                        evidence, "remote_service", 7, "BadPort",
+                        f"Destination port {fp_i} is commonly used in implant demonstrations")
                 elif fp_i not in common_ports:
                     # Weighted low on purpose: plenty of ordinary traffic (QUIC,
                     # CDNs, game and chat clients) lands outside the common set, so
                     # on its own this is an observation rather than a finding. It
                     # used to score 8, which cleared the old threshold by itself.
-                    score += 4; flags += ["UncommonPort"]; why.append(f"Uncommon dest port {fp_i} to public {fip}")
+                    self._record_evidence(
+                        evidence, "remote_service", 3, "UncommonPort",
+                        f"Uncommon destination port {fp_i} to public {fip}")
 
-            # Baseline: established→public only matters with a co-signal
-            cosignal = any(t in flags for t in ("UnexpectedListener","HighPortListener","AdminPortOutbound","LOLBINOutbound","BadPort","UncommonPort"))
-            if state == "ESTABLISHED" and public_remote and cosignal:
-                score += 6; flags += ["EstablishedPublic"]; why.append(f"Established to public IP {fip}")
+            # Public/established is context, not a second major signal. It only
+            # contributes after some independently testable property was found.
+            if state == "ESTABLISHED" and public_remote and evidence:
+                self._record_evidence(
+                    evidence, "connection_context", 2, "EstablishedPublic",
+                    f"Established to public IP {fip}")
 
         # ---- UDP rules ----
         if proto.upper().startswith("UDP"):
@@ -975,38 +1083,49 @@ class OverviewAnalysis:
             else:
                 # UDP "any/*" sockets bound to 0.0.0.0 by odd owners get minor weight
                 if la in {"0.0.0.0", "::"} and lp_i >= 49152 and owner_l and owner_l not in system_owners:
-                    score += 4; flags += ["UDPAnyHighPort"]; why.append(f"Wildcard UDP high-port {lp_i} by {owner}")
+                    self._record_evidence(
+                        evidence, "listener", 4, "UDPAnyHighPort",
+                        f"Wildcard UDP high-port {lp_i} by {owner}")
 
-        # Volume (context only; never the only reason to alert thanks to global threshold)
-        if conn_count >= 50:
-            score += 8; flags += ["ConnBurst"]; why.append(f"Process has {conn_count} sockets")
-        elif conn_count >= 15:
-            score += 6; flags += ["ManyConns"]; why.append(f"Process has {conn_count} sockets")
-        if public_remote and same_remote_count >= 8:
-            score += 8; flags += ["ToSameRemote"]; why.append(f"Multiple sockets to {fip}")
+        # Volume is only corroboration. Busy browsers, update clients, and servers
+        # routinely exceed these counts, so volume cannot create a finding alone.
+        primary = any(f in evidence for f in ("listener", "attribution", "remote_service", "process_behavior"))
+        if primary:
+            if conn_count >= 50:
+                self._record_evidence(
+                    evidence, "volume", 4, "ConnBurst", f"Process has {conn_count} active sockets")
+            elif conn_count >= 15:
+                self._record_evidence(
+                    evidence, "volume", 3, "ManyConns", f"Process has {conn_count} active sockets")
+            if public_remote and same_remote_count >= 8:
+                self._record_evidence(
+                    evidence, "volume", 5, "ToSameRemote",
+                    f"Multiple active sockets to {fip}")
 
         # Minor: loopback pair on uncommon ports (often IPC)
         if is_loopback(lip) and fip and is_loopback(fip) and lp_i and fp_i and lp_i not in common_ports and fp_i not in common_ports:
-            score += 2; flags += ["LoopbackPair"]; why.append("Loopback pair on uncommon ports")
+            self._record_evidence(
+                evidence, "connection_context", 2, "LoopbackPair",
+                "Loopback pair on uncommon ports")
 
+        score, flags, why = self._finish_evidence(evidence)
         return int(score), flags, " | ".join(why) if why else "—"
 
     ################################################################
        
     def _score_scheduled_task(self, row: dict) -> tuple[int, list[str]]:
         """
-        DFIR-informed scoring for Scheduled Tasks:
-        (+10-12) : Risky script/obfuscation/remote content, Script payload, and Non-system/user-writable path
-        (+6-8): LOLBin used with risky content
-        (+1-2): User profile path, Auto-start trigger, Privileged principal, Hidden window, DLL via rundll32, COM reg via regsvr32
+        DFIR-informed scheduled-task scoring by independent hypothesis family:
+        payload semantics, payload location, execution method, and task context.
+        Only the strongest observation in each family contributes.
         """
-        score, why = 0, []
+        evidence: Dict[str, Tuple[int, str, str]] = {}
         name  = str(row.get("Task Name") or "")
         act   = str(row.get("Action") or "")
         args  = str(row.get("Action Arguments") or "")
         trig  = str(row.get("Trigger Type") or "")
         princ = (str(row.get("Principal ID") or "") or str(row.get("Author") or ""))
-        enabled = bool(row.get("Enabled", True))
+        enabled = self._as_bool(row.get("Enabled", True), default=True)
 
         la = (act or "").lower()
         aa = (args or "").lower()
@@ -1015,17 +1134,20 @@ class OverviewAnalysis:
         # --- classifiers ---
         lolbins = ("powershell.exe","pwsh.exe","cmd.exe","wscript.exe","cscript.exe","mshta.exe",
                 "rundll32.exe","regsvr32.exe","msbuild.exe","wmic.exe","bitsadmin.exe","schtasks.exe")
-        script_exts = (".ps1",".vbs",".js",".jse",".wsf",".hta",".bat",".cmd",".psm1")
-        risky_tokens = (
-            "-enc","-encodedcommand"," frombase64string","iex ",
-            "-nop","-noprofile","-w hidden","-windowstyle hidden",
-            "-executionpolicy bypass","-ep bypass","powershell -e ",
-            "http://","https://","bitsadmin /transfer","\\curl.exe","mshta "
+        risky_patterns = (
+            r"(?:^|\s)-(?:enc|encodedcommand)(?:\s|$)",
+            r"\bfrombase64string\b", r"(?:^|\s)iex(?:\s|\()",
+            r"(?:^|\s)-(?:nop|noprofile)(?:\s|$)",
+            r"(?:^|\s)-(?:w|windowstyle)\s+hidden(?:\s|$)",
+            r"(?:^|\s)-(?:executionpolicy|ep)\s+bypass(?:\s|$)",
+            r"\bbitsadmin\s+/transfer\b",
         )
 
-        is_lolbin      = any(x in la for x in lolbins)
-        has_risky      = any(x in aa for x in risky_tokens)
-        has_script     = any(aa.strip().endswith(ext) or ext in aa for ext in script_exts)
+        action_name    = ntpath.basename(la.strip().strip('"\''))
+        action_stem    = ntpath.splitext(action_name)[0]
+        is_lolbin      = action_stem in {ntpath.splitext(name)[0] for name in lolbins}
+        has_risky      = any(re.search(pattern, aa) for pattern in risky_patterns)
+        has_script     = bool(re.search(r"\.(?:ps1|vbs|js|jse|wsf|hta|bat|cmd|psm1)(?:['\"]?\s|$)", aa))
         has_remote_url = ("http://" in aa) or ("https://" in aa)
 
         def _looks_pathlike(s: str) -> bool:
@@ -1061,35 +1183,50 @@ class OverviewAnalysis:
         looks_system32_action  = ("\\windows\\system32" in la) or ("system32\\" in la)
 
         # --- MAJOR ---
-        if has_risky or has_remote_url:
-            score += 12; why.append("Risky script/obfuscation/remote content")
+        if has_risky:
+            self._record_evidence(
+                evidence, "payload", 10, "OBFUSCATED",
+                "Obfuscated or policy-bypassing command arguments")
+        if has_remote_url:
+            self._record_evidence(
+                evidence, "payload", 9, "REMOTE",
+                "Command arguments reference remote content")
         if has_script:
-            score += 10; why.append("Script payload")
+            self._record_evidence(evidence, "payload", 6, "SCRIPT", "Script payload")
         if non_system_payload and not vendor_install:
-            score += 10; why.append("Non-system/user-writable path")
+            self._record_evidence(
+                evidence, "location", 8, "USERPATH", "Non-system/user-writable path")
         elif vendor_install:
-            score += 2; why.append("Per-user install directory")
+            self._record_evidence(
+                evidence, "location", 1, "USERINSTALL", "Per-user install directory")
 
         # --- Synergy ---
-        if is_lolbin and (has_risky or has_script or has_remote_url or non_system_payload):
-            score += 8; why.append(f"LOLBin used with risky content ({act})")
+        if is_lolbin and (has_risky or has_remote_url):
+            self._record_evidence(
+                evidence, "execution", 6, "LOLBIN",
+                f"LOLBin used with suspicious content ({act})")
         else:
             if is_lolbin:
-                score += 1; why.append(f"LOLBin action: {act}")
+                self._record_evidence(
+                    evidence, "execution", 1, "LOLBIN", f"LOLBin action: {act}")
 
         # --- MINOR ---
-        if in_profile_hint:
-            score += 1; why.append("User profile path")
-        if autostart:
-            score += 1; why.append(f"Auto-start trigger: {trig}")
-        if priv_prin:
-            score += 1; why.append(f"Privileged principal: {princ}")
-        if hidden:
-            score += 1; why.append("Hidden window")
+        context = []
+        if in_profile_hint: context.append("User profile path")
+        if autostart: context.append(f"Auto-start trigger: {trig}")
+        if priv_prin: context.append(f"Privileged principal: {princ}")
+        if hidden and not has_risky: context.append("Hidden window")
+        if context:
+            self._record_evidence(
+                evidence, "context", min(3, len(context)), "CONTEXT", "; ".join(context))
         if rundll_dll:
-            score += 1; why.append("DLL via rundll32")
+            self._record_evidence(
+                evidence, "execution", 3, "RUNDLL32", "DLL executed via rundll32")
         if regsvr_dll:
-            score += 1; why.append("COM reg via regsvr32")
+            self._record_evidence(
+                evidence, "execution", 3, "REGSVR32", "DLL executed via regsvr32")
+
+        score, _, why = self._finish_evidence(evidence)
 
         # --- Benign Microsoft/system32 cap (no major => cap to Low) ---
         no_major = not (has_risky or has_script or has_remote_url or (non_system_payload and not vendor_install))
@@ -1109,12 +1246,10 @@ class OverviewAnalysis:
 
     def _score_userassist_name(self, name: str) -> tuple[int, list[str]]:
         """
-        Heuristic scorer for UserAssist entries.
-        - (+10~+12): known tool tokens; Temp/Downloads/Desktop/Public/Recycle/Startup; UNC/non-system drives; generic non-system path
-        - (+6): script path types
-        - (+1~+2): exe/dll/com; entropy/length hints
+        Heuristic UserAssist scorer by independent hypothesis family: exact tool
+        identity, execution location, payload type, and filename shape.
         """
-        score, why = 0, []
+        evidence: Dict[str, Tuple[int, str, str]] = {}
         n = (name or '').strip()
         if not n:
             return 0, []
@@ -1141,25 +1276,29 @@ class OverviewAnalysis:
 
         # --- helpers ---
         def base_name(path: str) -> str:
-            return os.path.splitext(os.path.basename(path))[0]
+            return ntpath.splitext(ntpath.basename(path))[0]
 
         def ext_name(path: str) -> str:
-            return os.path.splitext(path)[1].lower()
+            return ntpath.splitext(path)[1].lower()
 
         def any_in(hay: str, tokens: tuple[str, ...]) -> bool:
             L = hay.lower()
             return any(t in L for t in tokens)
 
         # MAJOR: known tools
-        known_rt = (
+        known_rt = {
             "mimikatz","psexec","procdump","bloodhound","sharphound","rubeus","seatbelt",
             "powersploit","empire","crackmapexec","cme","koadic","evil-winrm","lazagne",
-            "winpeas","nc.exe","ncat","netcat","plink","pscp","beacon","cobaltstrike",
+            "winpeas","nc","ncat","netcat","plink","pscp","beacon","cobaltstrike",
             "metasploit","msfvenom","pafish","sharpdpapi","sharpup","sharproast",
-            "hashdump","pwdump","adfind","wce.exe","mimidrv","lsassy","kerberoast"
-        )
-        if any(k in n_lower for k in known_rt):
-            score += 12; why.append("Matches known red-team/tool name")
+            "hashdump","pwdump","adfind","wce","mimidrv","lsassy","kerberoast"
+        }
+        bn = base_name(n_lower)
+        tool_stem = re.sub(r"(?:32|64)$", "", bn)
+        if tool_stem in known_rt:
+            self._record_evidence(
+                evidence, "tool_identity", 12, "KNOWN_TOOL",
+                f"Executable name matches known dual-use/red-team tooling ({ntpath.basename(n_norm)})")
 
         # MAJOR: location heuristics
         TEMP_TOKENS = (
@@ -1173,36 +1312,33 @@ class OverviewAnalysis:
         STARTUP_TOKENS  = ("\\start menu\\programs\\startup\\",)
 
         if any_in(n_lower, TEMP_TOKENS):
-            score += 10; why.append("Temp-like directory")
+            self._record_evidence(evidence, "location", 10, "TEMP", "Temp-like directory")
         if any_in(n_lower, DOWNLOAD_TOKENS):
-            score += 10; why.append("Downloads directory")
+            self._record_evidence(evidence, "location", 10, "DOWNLOADS", "Downloads directory")
         if any_in(n_lower, DESKTOP_TOKENS):
-            score += 8;  why.append("Desktop directory")
+            self._record_evidence(evidence, "location", 8, "DESKTOP", "Desktop directory")
         if any_in(n_lower, PUBLIC_TOKENS):
-            score += 8;  why.append("Public user directory")
+            self._record_evidence(evidence, "location", 8, "PUBLIC", "Public user directory")
         if any_in(n_lower, RECYCLE_TOKENS):
-            score += 10; why.append("$Recycle.Bin directory")
+            self._record_evidence(evidence, "location", 10, "RECYCLE", "$Recycle.Bin directory")
         if any_in(n_lower, STARTUP_TOKENS):
-            score += 8;  why.append("Startup folder")
+            self._record_evidence(evidence, "location", 8, "STARTUP", "Startup folder")
 
         # MAJOR: non-system or network
         if (re.match(r"^[d-z]:\\", n_lower) or n_lower.startswith("\\\\")) and not has_system_kf_prefix:
-            score += 10; why.append("Non-system or network location")
+            self._record_evidence(
+                evidence, "location", 10, "NONSYSTEM", "Non-system or network location")
 
         # MAJOR: generic non-system
         try:
             if not has_system_kf_prefix and not_system_path(n_norm):
-                if "Non-system or network location" not in why and \
-                not any(tag in why for tag in ("Temp-like directory","Downloads directory","Desktop directory",
-                                                "Public user directory","$Recycle.Bin directory","Startup folder")):
-                    score += 8; why.append("Non-system path")
+                if "location" not in evidence:
+                    self._record_evidence(evidence, "location", 7, "NONSYSTEM", "Non-system path")
         except Exception:
             pass
 
         ext = ext_name(n_lower)
-        location_major_present = any(tag in why for tag in (
-            "Temp-like directory","Downloads directory","Desktop directory","Public user directory",
-            "$Recycle.Bin directory","Startup folder","Non-system or network location","Non-system path"))
+        location_major_present = "location" in evidence
 
         is_non_system = False
         try:
@@ -1211,26 +1347,31 @@ class OverviewAnalysis:
         except Exception:
             pass
 
-        if ext in (".ps1",".vbs",".js",".hta",".bat",".cmd"):
+        if ext in (".ps1", ".psm1", ".vbs", ".js", ".jse", ".wsf", ".hta", ".bat", ".cmd"):
             # Scripts are major only when non-system/user-writable; otherwise minor
             if is_non_system or location_major_present:
-                score += 6; why.append("Script path")
+                self._record_evidence(evidence, "payload_type", 6, "SCRIPT", "Script path")
             else:
-                score += 2; why.append("Script path (system)")
+                self._record_evidence(
+                    evidence, "payload_type", 2, "SCRIPT", "Script path (system)")
         elif ext in (".exe",".dll",".com"):
-            if is_non_system or location_major_present:
-                score += 2; why.append("Executable/library path")
+            # UserAssist already means the executable was launched; an executable
+            # extension is not an independent suspicious property.
+            pass
 
         # Minor filename hints
-        bn = base_name(n_lower)
+        name_hints = []
         if re.search(r"[a-f0-9]{8,}", bn):
-            score += 1; why.append("Hex-like name segment")
+            name_hints.append("Hex-like name segment")
         ent = char_entropy(re.sub(r"[^a-z0-9]", "", bn))
         if len(bn) >= 6 and ent >= 4.0:
-            score += 1; why.append("High-entropy basename")
-        if len(bn) >= 24:
-            score += 1; why.append("Unusually long name")
+            name_hints.append("High-entropy basename")
+        if name_hints:
+            self._record_evidence(
+                evidence, "name_shape", min(2, len(name_hints)), "NAME_SHAPE",
+                "; ".join(name_hints))
 
+        score, _, why = self._finish_evidence(evidence)
         return int(score), why
 
 
@@ -1278,7 +1419,7 @@ class OverviewAnalysis:
             # not be read; .strip() on that raised AttributeError.
             name = (r.get("ImageFileName") or "").strip()
             ppid = self._as_int(r.get("PPID") or r.get("ppid"))
-            wow64 = bool(r.get("Wow64")) if r.get("Wow64") is not None else None
+            wow64 = self._as_bool(r.get("Wow64")) if r.get("Wow64") is not None else None
             start = r.get("CreateTime") or r.get("StartTime") or r.get("Start")
             census[pid] = {"pid": pid, "name": name, "ppid": ppid, "wow64": wow64,
                            "start": start, "path": ""}
@@ -1298,7 +1439,7 @@ class OverviewAnalysis:
             if not entry.get("name"):
                 entry["name"] = (r.get("ImageFileName") or "").strip()
             if entry.get("wow64") is None and r.get("Wow64") is not None:
-                entry["wow64"] = bool(r.get("Wow64"))
+                entry["wow64"] = self._as_bool(r.get("Wow64"))
         return census
    
     def _flatten_UA_with_context(self, rows):
@@ -1404,46 +1545,36 @@ class OverviewAnalysis:
         return [r for r in rows if str(r[risk_index]) in allowed]
 
     @staticmethod
-    def _is_hexdump_susp(hexdump: str) -> bool:
-        """
-        Analyze the hexdump of a memory region to detect common malicious byte sequences.
-        Returns True if suspicious patterns are found; False otherwise.
-        """
-        bytes_data = bytes.fromhex(hexdump.replace(" ", "").replace("\n", ""))
+    def _ip_from_endpoint(value: Any) -> str:
+        """Return a canonical IP from plain, bracketed, or host:port text."""
+        text = str(value or "").strip()
+        if not text or text in {"*", "0.0.0.0", "::"}:
+            return text
+        if text.startswith("[") and "]" in text:
+            text = text[1:text.index("]")]
+        text = text.split("%", 1)[0]  # IPv6 scope identifier
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            pass
+        # Some renderers combine IPv4 and port despite exposing a port column.
+        if text.count(":") == 1:
+            host, port = text.rsplit(":", 1)
+            if port.isdigit():
+                try:
+                    return str(ipaddress.ip_address(host))
+                except ValueError:
+                    pass
+        return ""
 
-        # Patterns to look for in hexdump (YARA-like signatures)
-        suspicious_patterns = [
-            b"\x90" * 4,  # At least 4 consecutive NOPs
-            b"\xfc\xe8\x8f\x00\x00\x00\x60",  # Meterpreter reverse TCP prologue
-            b"\xe8[\x00-\xff]{4}[\x00-\xff]{2}",  # CALL instruction with variable offset
-            b"\xeb[\x00-\xff]{1,2}",  # Short jump (JMP) with variable offset
-            b"\x64\x8b\x00",  # mov edx, fs:[???]
-            b"\x68\x32\x74\x91",  # Windows socket signature
-            b"\x29\x80\x6b\x00",  # Self-modifying code signature
-        ]
-        for pattern in suspicious_patterns:
-            if pattern in bytes_data:
-                return True 
-        return False  
+    @classmethod
+    def _is_public_ip(cls, value: Any) -> bool:
+        ip = cls._ip_from_endpoint(value)
+        try:
+            return ipaddress.ip_address(ip).is_global
+        except ValueError:
+            return False
 
-    @staticmethod
-    def _is_disasm_susp(disasm: str) -> bool:
-        suspicious_patterns = [
-            r"\s*push\s+ebp",  # Standard function prologue (often overwritten in injected code)
-            r"\s*mov\s+ebp,\s+esp",  # Moving stack pointer to base pointer
-            r"\s*add\s+esp,\s+0x[0-9a-f]+",  # Stack manipulation
-            r"\s*(call|jmp)\s+.*",  # Unusual function calls or jumps (shellcode markers)
-            r"\s*xor\s+eax,\s+eax",  # Resetting register values
-            r"\s*xor\s+ecx,\s+ecx",  # Another register obfuscation pattern
-            r"\s*inc\s+eax",  # Shellcode often increments eax (part of shellcode logic)
-            r"\s*shl\s+eax,\s+\d+",  # Shifting register values (often used in shellcode)
-        ]
-        
-        for pattern in suspicious_patterns:
-            if re.search(pattern, disasm):
-                return True 
-        return False
-    
     @staticmethod
     def _is_private_ip(ip: str) -> bool:
         try:
@@ -1464,10 +1595,27 @@ class OverviewAnalysis:
         if not s: return False
         ls = s.lower()
         return (
-            bool(__import__("re").match(r"^[a-z]:\\", s)) or
+            bool(re.match(r"^[a-z]:\\", ls)) or
             ls.startswith("\\??\\") or
-            ("\\" in s and any(ext in ls for ext in (".exe",".dll",".ps1",".vbs",".js",".hta",".bat")))
+            ("\\" in s and any(ext in ls for ext in (
+                ".exe", ".dll", ".com", ".lnk", ".ps1", ".psm1", ".vbs",
+                ".js", ".jse", ".wsf", ".hta", ".bat", ".cmd")))
         )
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        text = str(value).strip().lower()
+        if text in {"true", "yes", "y", "1", "enabled"}:
+            return True
+        if text in {"false", "no", "n", "0", "disabled", ""}:
+            return False
+        return default
     
     @staticmethod        
     def _as_int(v) -> Optional[int]:
@@ -1475,4 +1623,3 @@ class OverviewAnalysis:
             return int(v)
         except Exception:
             return None
-
