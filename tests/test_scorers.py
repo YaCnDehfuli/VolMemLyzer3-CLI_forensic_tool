@@ -129,6 +129,13 @@ def test_an_orphan_is_scored_once(eng):
     assert scored[1] == [] or scored[1][0][4].count("ZB") == 1
 
 
+def test_pid_zero_is_the_kernel_root_not_an_orphan(eng):
+    census = _census((4, "System", 0, ""))
+    summary, rows = eng._score_processes(census, psscan=[], psxview=None)
+    assert summary["orphans"] == 0
+    assert rows == []
+
+
 def test_each_pid_appears_at_most_once(eng):
     census = _census((1, "a.exe", None, "C:\\Users\\u\\Downloads\\a.exe"),
                      (2, "b.exe", 1, "C:\\Users\\u\\Desktop\\b.exe"))
@@ -163,6 +170,26 @@ def test_a_near_miss_system_name_surfaces(eng):
     census = _census((1234, "svch0st.exe", 900, f"{SYS}\\svch0st.exe"))
     _, rows = eng._score_processes(census, psscan=[], psxview=None)
     assert rows and "LOOK" in rows[0][4]
+
+
+def test_script_interpreter_launching_external_native_child_surfaces(eng):
+    census = _census(
+        (5048, "powershell.exe", 1000, f"{SYS}\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        (7936, "malware.exe", 5048, "Z:\\malware.exe"),
+    )
+    _, rows = eng._score_processes(census, psscan=[], psxview=None)
+    child = next(row for row in rows if row[0] == 7936)
+    assert "SCRIPT_CHILD_EXTERNAL" in child[4]
+    assert child[3] in {"Medium", "High", "Critical"}
+
+
+def test_script_interpreter_with_standard_install_child_is_not_the_external_rule(eng):
+    census = _census(
+        (5048, "powershell.exe", 1000, f"{SYS}\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        (6000, "python.exe", 5048, "C:\\Program Files\\Python\\python.exe"),
+    )
+    _, rows = eng._score_processes(census, psscan=[], psxview=None)
+    assert not any("SCRIPT_CHILD_EXTERNAL" in row[4] for row in rows)
 
 
 def test_one_psxview_disagreement_is_not_enough(eng):
@@ -291,6 +318,36 @@ def test_high_level_is_the_same_knob_as_min_risk_high():
 
 
 # --------------------------------------------------------------------------
+# network attribution and independent corroboration
+# --------------------------------------------------------------------------
+
+def _connection(**over):
+    row = {
+        "State": "ESTABLISHED", "Proto": "TCPv4",
+        "LocalAddr": "10.0.0.5", "LocalPort": 50000,
+        "ForeignAddr": "8.8.8.8", "ForeignPort": 443,
+        "Owner": "", "PID": None,
+        "_pid_conn_count": 1, "_same_remote_count": 1,
+    }
+    row.update(over)
+    return row
+
+
+def test_public_connection_without_pid_is_context_not_a_finding(eng):
+    score, flags, _ = eng._score_network_connections(
+        _connection(), eng._is_private_ip, eng._is_loopback)
+    assert flags == ["PublicNoPID"]
+    assert score < eng._threshold("netscan")
+
+
+def test_unattributed_public_admin_connection_has_independent_corroboration(eng):
+    score, flags, _ = eng._score_network_connections(
+        _connection(ForeignPort=445), eng._is_private_ip, eng._is_loopback)
+    assert {"PublicNoPID", "AdminPortOutbound", "EstablishedPublic"} <= set(flags)
+    assert score >= eng._threshold("netscan")
+
+
+# --------------------------------------------------------------------------
 # scheduled tasks, against rows taken from a real Windows 10 image
 #
 # The machine these came from surfaced 286 of its 323 scheduled tasks as
@@ -356,6 +413,94 @@ def test_an_encoded_powershell_task_surfaces(eng):
     score, _ = eng._score_scheduled_task(
         _task("Updater", "powershell.exe", "-nop -w hidden -enc SQBFAFgA", "Logon"))
     assert score >= eng._threshold("scheduled_tasks")
+
+
+def test_task_argument_rationales_do_not_call_every_switch_obfuscation(eng):
+    _, why = eng._score_scheduled_task(
+        _task("Updater", "powershell.exe", "-noprofile -windowstyle hidden"))
+    assert "Hidden-window argument" in why
+    assert "PowerShell profile loading disabled" not in why  # strongest payload signal wins
+    assert not any("Obfuscat" in reason for reason in why)
+
+
+def test_bits_transfer_is_named_as_transfer_not_obfuscation(eng):
+    score, why = eng._score_scheduled_task(
+        _task("Updater", "cmd.exe", "bitsadmin /transfer job https://example.test/a x"))
+    assert score >= eng._threshold("scheduled_tasks")
+    assert "BITS transfer command in arguments" in why
+    assert not any("Obfuscat" in reason for reason in why)
+
+
+def test_bits_action_with_transfer_arguments_surfaces(eng):
+    score, why = eng._score_scheduled_task(
+        _task("Updater", "C:\\Windows\\System32\\bitsadmin.exe",
+              "/transfer job https://example.test/a C:\\Temp\\a"))
+    assert score >= eng._threshold("scheduled_tasks")
+    assert "BITS transfer command in arguments" in why
+
+
+def test_bare_bitsadmin_action_is_not_called_a_transfer(eng):
+    _, why = eng._score_scheduled_task(
+        _task("Updater", "C:\\Windows\\System32\\bitsadmin.exe", "/list"))
+    assert "BITS transfer command in arguments" not in why
+
+
+# --------------------------------------------------------------------------
+# UserAssist: execution location is corroboration, not a verdict
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path", [
+    r"D:\\virtio-win-guest-tools.exe",
+    r"C:\\Users\\alice\\Downloads\\setup.exe",
+    r"C:\\Users\\alice\\AppData\\Local\\Temp\\updater.exe",
+])
+def test_userassist_location_alone_stays_below_surface_threshold(eng, path):
+    score, _ = eng._score_userassist_name(path)
+    assert score < eng._threshold("userassist")
+
+
+def test_userassist_exact_known_tool_plus_location_surfaces(eng):
+    score, why = eng._score_userassist_name(r"D:\\Packed\\pafish64.exe")
+    assert score >= eng._threshold("userassist")
+    assert any("known dual-use" in reason for reason in why)
+
+
+def test_userassist_script_in_risky_location_surfaces(eng):
+    score, why = eng._score_userassist_name(r"C:\\Users\\alice\\Downloads\\stage.ps1")
+    assert score >= eng._threshold("userassist")
+    assert "Script path" in why
+
+
+# --------------------------------------------------------------------------
+# SSDT integrity (deep-only)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("module", [
+    "ntoskrnl", "ntoskrnl.exe", "win32k.sys", "win32kbase.sys", "win32kfull.sys",
+])
+def test_expected_windows_ssdt_target_is_not_a_finding(eng, module):
+    score, flag, _ = eng._score_ssdt_entry(
+        {"Address": 0xFFFFF80000001000, "Index": 1, "Module": module,
+         "Symbol": "NtOpenProcess"})
+    assert (score, flag) == (0, "")
+
+
+def test_foreign_ssdt_target_surfaces(eng):
+    score, flag, why = eng._score_ssdt_entry(
+        {"Address": 0xFFFFF80100001000, "Index": 1, "Module": "thirdparty.sys",
+         "Symbol": "NtOpenProcess"})
+    assert score >= eng._threshold("ssdt")
+    assert flag == "SSDT_FOREIGN_MODULE"
+    assert "thirdparty.sys" in why
+
+
+def test_unresolved_ssdt_target_is_unknown_not_a_hook(eng):
+    assert eng._score_ssdt_entry({"Module": "N/A", "Symbol": "", "Address": None})[0] == 0
+
+
+def test_ssdt_is_only_scheduled_for_deep_kernel_analysis(eng):
+    assert eng._plugins_for([5], deep=False) == []
+    assert eng._plugins_for([5], deep=True) == ["ssdt"]
 
 
 # --------------------------------------------------------------------------
@@ -434,7 +579,8 @@ def test_the_shellcode_region_surfaces(eng):
     score, flags, _ = eng._score_injections(_region(SHELLCODE, CommitCharge=2))
     assert score >= eng._threshold("malfind")
     assert eng._risk_from_score(score) in {"High", "Critical"}
-    assert "LDRWALK" in flags and "SEG" in flags
+    assert "LDRWALK" in flags
+    assert "SEG" not in flags  # weaker evidence from the same loader-behavior family
 
 
 @pytest.mark.parametrize("data,label", [

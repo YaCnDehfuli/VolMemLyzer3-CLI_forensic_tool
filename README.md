@@ -85,7 +85,7 @@ volmemlyzer \
   analyze \
   -i /cases/host.vmem \
   -o /cases/.volmemlyzer \
-  --steps 0,1,2,3,4 \
+  --steps 0,1,2,3,4,5 \
   --json
 ```
 
@@ -108,10 +108,16 @@ table is not a clean machine. Thresholds live in
 `utilities.SUSPICIOUS_DIRS` / `USER_INSTALL_SUBDIRS`, so tuning for your estate
 is a data edit rather than a code change.
 
-`--deep` adds the slow cross-check plugins to the process census. Today that is
-`psxview`, which re-runs `psscan`, `thrdscan` and a csrss handle sweep internally
-and will dominate the run on a large image; the census itself comes from
-`pslist`, `pstree` and `psscan` without it.
+The complete security-logic specification—including every rule, weight, regular
+expression, evidence family, ATT&CK alignment, false-positive control, and
+cache-only validation result—is in
+**[Analysis rules and validation](docs/ANALYSIS_RULES.md)**.
+
+`--deep` adds `psscan`, `psxview`, `netscan`, `registry.hivescan`, and the SSDT
+integrity view. `psxview` itself invokes `psscan`, `thrdscan`, and a CSRSS handle
+sweep and can dominate a run on a large image. Quick mode excludes those pool
+and cross-view scanners; `malfind`, `pslist`, `pstree`, scheduled tasks, and
+UserAssist remain available.
 
 ### `run`
 
