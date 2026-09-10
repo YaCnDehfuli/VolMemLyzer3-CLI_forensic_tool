@@ -50,7 +50,10 @@ volmemlyzer analyze -i /cases/host.vmem
 volmemlyzer extract -i /cases/host.vmem -f json
 ```
 
-The published wheel is `volmemlyzer==3.0.1` (`pip install volmemlyzer`). A clean checkout of this tree is the source of the measured figure above.
+The repository release is `v3.1.0`. PyPI currently publishes
+`volmemlyzer==3.0.1`; install from a tagged checkout to use the 3.1 analysis and
+reporting changes. A clean checkout of this tree is the source of the measured
+figure above.
 
 ## Requirements
 

@@ -241,8 +241,7 @@ integrity of the observation but does not add “agreement points.” Rewarding
 normal agreement would inflate scores without adding suspicious evidence.
 
 The filename `2580_5.vmem` does **not** contain PID 2580 in the supplied cached
-process artifacts; its observed payload process is PID 7936. The cache labeled
-`2196.vmem` likewise contains neither PID 2196 nor `malware.exe`. The report uses
+process artifacts; its observed payload process is PID 7936. The report uses
 observed PIDs rather than converting a filename hint into evidence.
 
 ---
@@ -358,11 +357,8 @@ rb"\x0f\xa8.{0,4}\x1f"
 
 #### Validation behavior
 
-The two caches contain 31 raw `malfind` rows:
-
-- 19 in `2580_5.vmem`;
-- 12 in the usable `2196.vmem` comparison cache; and
-- all 31 are private RWX regions scoring 8/30 and remain below threshold.
+The completed `2580_5.vmem` cache contains 19 raw `malfind` rows. All 19 are
+private RWX regions scoring 8/30 and remain below threshold.
 
 The rows include PowerShell, SearchHost, Python, and Outlook memory. This is the
 negative control that prevents “RWX equals malware.”
@@ -711,11 +707,11 @@ Findings are grouped by normalized module and include an entry count plus at
 most five sample symbols. One foreign module therefore cannot create hundreds
 of duplicate alerts.
 
-The usable `2196.vmem` SSDT cache contains 965 entries; all resolve to
-`ntoskrnl`, producing **0 findings**. This is a real negative-control result.
-The positive path is unit-tested with a synthetic `thirdparty.sys` target, but
-the supplied caches contain no known positive hook. The rule is consequently a
-kernel-integrity lead, not a validated rootkit detector.
+The completed `2580_5.vmem` cache does not include SSDT output. The positive
+path is unit-tested with a synthetic `thirdparty.sys` target, but the published
+cache evidence does not validate either a clean baseline or a positive hook.
+The rule is consequently a kernel-integrity lead, not a validated rootkit
+detector.
 
 ---
 
@@ -726,37 +722,33 @@ over cached JSON. No UI was used, no memory image was rerun, and no network
 reputation lookup influenced scoring.
 
 <p align="center">
-  <img src="figures/analysis-cache-validation.svg" alt="Cache-only validation matrix for the 2580_5 and 2196 cache sets" width="100%">
+  <img src="figures/analysis-cache-validation.svg" alt="Cache-only validation matrix for the completed 2580_5 cache set" width="100%">
 </p>
 <sub>“Unavailable” means the plugin artifact was absent, empty, or failed. It is
 not plotted as zero. Counts describe surfaced review objects, not true/false
-positive rates because the two images do not provide complete ground-truth
-labels.</sub>
+positive rates because the image does not provide complete ground-truth labels.</sub>
 
 ### Observed results
 
 | Cache | Process | `malfind` | Network | Tasks | UserAssist | SSDT |
 |---|---:|---:|---:|---:|---:|---:|
 | `2580_5.vmem` | 3/138 | 0/19 | 0/104 | 3/323 | 2/103 | unavailable |
-| `2196.vmem` | 0/141 | 0/12 | unavailable | unavailable | unavailable | 0/965 |
 
 The numerator is surfaced objects; the denominator is evaluated input objects.
 For process census the denominator is the union of visible and carved PIDs,
 not the sum of plugin rows.
 
-### What the comparison established
+### What the validation established
 
 1. **External interpreter child survives.** The PowerShell → `Z:\malware.exe`
-   relationship in `2580_5.vmem` reaches 15/30; no equivalent relationship is
-   present in the usable 2196 cache.
-2. **Raw RWX does not survive.** All 31 cached `malfind` rows stop at 8/30.
+   relationship in `2580_5.vmem` reaches 15/30.
+2. **Raw RWX does not survive.** All 19 cached `malfind` rows stop at 8/30.
 3. **PID-less public sockets do not self-corroborate.** Twenty-seven former
    rows fall below threshold.
 4. **Location-only execution history does not survive.** Seven installer/path
    rows fall below threshold; two exact Pafish names remain.
 5. **Task conjunction survives.** Only the three PowerShell/logon/workspace
    tasks cross threshold.
-6. **SSDT baseline stays quiet.** All 965 targets resolve to `ntoskrnl`.
 
 ### Reproducibility metadata
 
@@ -770,7 +762,7 @@ The main verification command is:
 python -m pytest -q
 ```
 
-At publication, the suite contains 178 passing tests, including:
+The automated suite covers:
 
 - normal Windows boot and PID 0 controls;
 - process lookalike and external-interpreter-child positives;
@@ -794,16 +786,11 @@ what it surfaces.
 | Amcache user/non-system path | 75/774 entries | Reject alone: includes ordinary Edge, Python, Office, and OneDrive software |
 | Public established socket with no PID | 27 former findings, 17 unique endpoints | Demote to 3-point context; no ATT&CK mapping |
 | Broad `rundll32.exe` task | Numerous stock Windows maintenance tasks | Reject alone; require suspicious content/correlation |
-| Raw private RWX VAD | 31/31 cached `malfind` rows | Keep at 8, below threshold |
+| Raw private RWX VAD | 19/19 cached `malfind` rows | Keep at 8, below threshold |
 | `hivescan` offset absent from `hivelist` | Counts agree in available cache | Context count only; carved hive pages may be stale |
-| `ldrmodules` single-list absence | Candidate files are zero-byte failures | Defer: require all-list absence plus executable/private PE corroboration |
-| Suspicious `svcscan` configuration | Candidate file is a zero-byte failure | Defer: require auto-start plus user-writable/interpreter path; optionally running PID |
-| Suspicious `cmdline` content | Candidate file is a zero-byte failure | Defer: patterns can be unit-tested, but not claimed cache-validated |
-
-The zero-byte 2196 artifacts include `svcscan`, `cmdline`, `ldrmodules`,
-`privileges`, `callbacks`, `driverirp`, and IAT results. Their stderr files show
-Volatility/Python failures. No rule is published as empirically validated from
-those files.
+| `ldrmodules` single-list absence | No complete published validation artifact | Defer: require all-list absence plus executable/private PE corroboration |
+| Suspicious `svcscan` configuration | No complete published validation artifact | Defer: require auto-start plus user-writable/interpreter path; optionally running PID |
+| Suspicious `cmdline` content | No complete published validation artifact | Defer: patterns can be unit-tested, but not claimed cache-validated |
 
 ## ATT&CK mapping principles
 
@@ -829,8 +816,8 @@ those files.
    stale allocations, duplicate rows, or incomplete attribution.
 4. **Environment variation.** Windows versions, enterprise software, EDR
    products, developer tools, and localization change normal baselines.
-5. **No prevalence calibration.** Two cache sets are useful regression and
-   negative controls, not a representative benign/malicious corpus.
+5. **No prevalence calibration.** One completed cache set is a useful regression
+   fixture, not a representative benign/malicious corpus.
 6. **No automatic allowlisting by publisher.** Signature, hash, and reputation
    data are not available in these artifacts.
 7. **No negative verdict.** Missing or failed plugins reduce coverage. They do

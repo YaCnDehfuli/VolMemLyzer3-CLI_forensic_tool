@@ -276,7 +276,7 @@ def main() -> None:
     .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }}
     .button {{ display: inline-flex; padding: 11px 16px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel); text-decoration: none; font-weight: 700; }}
     .button.primary {{ background: var(--cyan); color: #041319; border-color: var(--cyan); }}
-    .metrics {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; margin-top: 56px; border: 1px solid var(--line); background: var(--line); }}
+    .metrics {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; margin-top: 56px; border: 1px solid var(--line); background: var(--line); }}
     .metric {{ min-width: 0; padding: 20px; background: rgba(12,24,40,.96); }}
     .metric strong {{ display: block; color: var(--text); font-size: 29px; line-height: 1.15; }}
     .metric span {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }}
@@ -370,7 +370,6 @@ def main() -> None:
         <div class="metric"><strong>{len(features)}</strong><span>Extracted features</span></div>
         <div class="metric"><strong>{group_count}</strong><span>Feature groups</span></div>
         <div class="metric"><strong>30</strong><span>Score ceiling</span></div>
-        <div class="metric"><strong>178</strong><span>Passing tests</span></div>
       </div>
     </div>
 
@@ -415,7 +414,7 @@ def main() -> None:
 
     <section id="validation">
       <div class="shell">
-        <div class="section-head"><div><div class="eyebrow">Cache-only validation</div><h2>Measured against two supplied cache sets.</h2></div><p>Pure scorer functions were invoked over cached JSON. No UI, memory-image rerun, or network reputation lookup influenced the results. Unavailable artifacts are never treated as clean.</p></div>
+        <div class="section-head"><div><div class="eyebrow">Cache-only validation</div><h2>Measured against the completed 2580_5 cache.</h2></div><p>Pure scorer functions were invoked over cached JSON. No UI, memory-image rerun, or network reputation lookup influenced the results. Unavailable artifacts are never treated as clean.</p></div>
         <div class="grid-2">
           <div class="panel">
             <h3>Surfaced / evaluated objects</h3>
@@ -440,7 +439,7 @@ def main() -> None:
 
     <section id="features">
       <div class="shell">
-        <div class="section-head"><div><div class="eyebrow">Feature schema</div><h2>520 extracted features without a 900-line scroll.</h2></div><p>Features describe image-level measurements produced by registered extractors. They are separate from the analyst-facing surfacing rules above and generally require host-class baselines before interpretation.</p></div>
+        <div class="section-head"><div><div class="eyebrow">Feature schema</div><h2>520 extracted features, organized for review.</h2></div><p>Features describe image-level measurements produced by registered extractors. They are separate from the analyst-facing surfacing rules above and generally require host-class baselines before interpretation.</p></div>
         <div class="grid-2">
           <div class="panel"><h3>Largest feature groups</h3>{feature_bars(features)}</div>
           <div class="panel"><h3>How to read the catalog</h3><p>Search by feature name, plugin group, or documented interpretation. Ratios and entropy values are measurements—not automatic indicators. Empty plugin output means unavailable coverage, not a zero-risk host.</p><p class="feature-note">The full semantic source remains versioned in <a href="{REPOSITORY}/blob/main/FEATURES.md">FEATURES.md</a>; this interface is generated from it.</p></div>
@@ -465,7 +464,7 @@ def main() -> None:
           <div class="boundary"><strong>No score inflation</strong><span>Correlated observations share a family; duplicates and repeated SSDT entries cannot manufacture severity.</span></div>
           <div class="boundary"><strong>No missing-data assumption</strong><span>Failed and zero-byte deep-plugin artifacts remain unavailable instead of becoming negative evidence.</span></div>
           <div class="boundary"><strong>No filename-to-technique jump</strong><span>Dual-use tool names and dump filenames are hints. They do not prove binary identity or adversary behavior.</span></div>
-          <div class="boundary"><strong>No raw-RWX verdict</strong><span>All 31 cached malfind rows were private RWX and stayed below threshold without payload or loader corroboration.</span></div>
+          <div class="boundary"><strong>No raw-RWX verdict</strong><span>All 19 cached malfind rows were private RWX and stayed below threshold without payload or loader corroboration.</span></div>
           <div class="boundary"><strong>No port-only C2 claim</strong><span>Ports are supporting context because this layer does not parse application protocols or reputation.</span></div>
         </div>
       </div>
