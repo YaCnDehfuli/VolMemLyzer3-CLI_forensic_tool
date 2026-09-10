@@ -29,6 +29,16 @@ Parallel vs serial is `2.4×` (`172.16/71.12`). Cache-warm is artifact reuse, no
 
 [MemTriage](https://github.com/YaCnDehfuli/MemTriage) consumes this extract layer. [VADViT](https://github.com/YaCnDehfuli/VADViT) is the model MemTriage runs after extraction. VolMemLyzer does not classify malware.
 
+## Evidence report
+
+Open the **[interactive analysis and feature report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/)** for the score model, searchable rule catalog, cache validation, and a searchable view of all 520 extracted features.
+
+The repository-native sources remain available for audit and change review:
+
+- [exact analysis rules, regular expressions, weights, and ATT&CK alignment](docs/ANALYSIS_RULES.md);
+- [semantic feature catalog](FEATURES.md); and
+- [machine-readable cache-validation metadata](docs/analysis-cache-validation.json).
+
 ## Quickstart
 
 ```bash
@@ -70,7 +80,9 @@ relocations such as `windows.malfind` moving to `windows.malware.malfind` are
 handled without changes here. `volmemlyzer list --registry` prints the resolved
 name for every extractor and flags anything your build does not provide.
 
-The complete feature schema is documented in [FEATURES.md](FEATURES.md).
+The complete feature schema is documented in [FEATURES.md](FEATURES.md) and can
+be searched by plugin group in the
+[interactive report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#features).
 
 ### `analyze`
 
@@ -92,7 +104,9 @@ volmemlyzer \
 Every plugin the requested steps need is collected in a single scheduled run
 before any step interprets its output, so the steps overlap instead of queueing.
 
-Use `--no-cache` to force fresh plugin runs. Supported step aliases include `bearings`, `processes`, `injections`, `network`, `persistence`, `kernel`, and `report`.
+Use `--no-cache` to force fresh plugin runs. Supported step aliases include
+`bearings`, `processes`, `injections`, `network`, `persistence`, `kernel`, and
+`ssdt`.
 
 ### Reading the risk column
 
@@ -111,7 +125,9 @@ is a data edit rather than a code change.
 The complete security-logic specification—including every rule, weight, regular
 expression, evidence family, ATT&CK alignment, false-positive control, and
 cache-only validation result—is in
-**[Analysis rules and validation](docs/ANALYSIS_RULES.md)**.
+**[Analysis rules and validation](docs/ANALYSIS_RULES.md)**. For a concise,
+filterable presentation, open the
+**[interactive evidence report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#rules)**.
 
 `--deep` adds `psscan`, `psxview`, `netscan`, `registry.hivescan`, and the SSDT
 integrity view. `psxview` itself invokes `psscan`, `thrdscan`, and a CSRSS handle
