@@ -18,6 +18,7 @@ class OverviewAnalysis:
       2) Memory Injections (malfind)
       3) Networking (netscan deep)
       4) Persistence & User Activity (hives, run keys, tasks, userassist)
+      5) Kernel Dispatch Integrity (SSDT deep)
     """
     # One ladder, used everywhere. A row's score maps to a band, and a row is only
     # tabled when it clears its surface threshold.
@@ -49,6 +50,7 @@ class OverviewAnalysis:
         "netscan": 9,
         "scheduled_tasks": 9,
         "userassist": 9,
+        "ssdt": 9,
     }
     # Retained so callers that reached into the old name keep working.
     BASELINE_SCORES = SURFACE_THRESHOLDS
@@ -79,6 +81,7 @@ class OverviewAnalysis:
         1: ("psscan", "psxview"),
         3: ("netscan",),
         4: ("registry.hivescan",),
+        5: ("ssdt",),
     }
 
     def run_steps(
@@ -109,7 +112,7 @@ class OverviewAnalysis:
                                        "maximum": self.MAX_RISK_SCORE,
                                        "not_a_probability": True,
                                    }}
-        wanted = list(steps) if steps is not None else [0, 1, 2, 3, 4]
+        wanted = list(steps) if steps is not None else [0, 1, 2, 3, 4, 5]
         self._prefetch(pipe, image_path, artifacts_dir, wanted, use_cache, concurrency, deep)
 
         executed = []
@@ -131,7 +134,11 @@ class OverviewAnalysis:
             elif s == 4:
                 results["step4"] = self.step4_persistence(pipe, image_path, artifacts_dir, use_cache,
                                                           high_level, deep=deep)
-                executed.append(4)            
+                executed.append(4)
+            elif s == 5:
+                results["step5"] = self.step5_kernel(pipe, image_path, artifacts_dir, use_cache,
+                                                      high_level, deep=deep)
+                executed.append(5)
         results["executed_steps"] = executed
         return results
 
@@ -570,6 +577,75 @@ class OverviewAnalysis:
         out["iocs"] = iocs_sorted
         return out
 
+    # ---------------- Step 5 · Kernel dispatch integrity (SSDT deep) -------
+
+    def step5_kernel(self, pipe: Pipeline, image_path: str, artifacts_dir: str,
+                     use_cache: bool, high_level: bool, deep: bool = False) -> Dict[str, Any]:
+        """Surface SSDT targets attributed outside expected Windows kernel modules.
+
+        This is deliberately deep-only. A foreign target is a kernel-dispatch
+        integrity lead, not proof of a rootkit: security software and acquisition
+        artifacts remain alternative explanations. Repeated entries are grouped by
+        module so one hook hypothesis cannot flood the table.
+        """
+        TerminalUI.section("Step 5 · Kernel dispatch integrity (SSDT deep)")
+
+        if not deep:
+            TerminalUI.note("Skipped in quick mode; use --deep for the SSDT integrity view.")
+            return {"ok": True, "skipped": True, "reason": "deep_only"}
+        if not pipe.registry.has("ssdt"):
+            TerminalUI.note("ssdt not registered; skipping deep view")
+            return {"ok": False}
+
+        ssdt_path = self._ensure_one(pipe, image_path, artifacts_dir, "ssdt", use_cache)
+        rows = load_records_any(ssdt_path) or []
+        grouped: Dict[str, Dict[str, Any]] = {}
+
+        for row in rows:
+            score, flag, rationale = self._score_ssdt_entry(row)
+            if score < self._threshold("ssdt"):
+                continue
+            module = str(row.get("Module") or "").strip()
+            key = ntpath.basename(module.replace("/", "\\")).lower()
+            finding = grouped.setdefault(key, {
+                "module": module,
+                "entry_count": 0,
+                "sample_symbols": [],
+                "score": int(score),
+                "score_max": self.MAX_RISK_SCORE,
+                "risk": self._risk_from_score(score),
+                "flags": [flag],
+                "rationale": rationale,
+            })
+            finding["entry_count"] += 1
+            symbol = str(row.get("Symbol") or "").strip()
+            if symbol and symbol not in finding["sample_symbols"] and len(finding["sample_symbols"]) < 5:
+                finding["sample_symbols"].append(symbol)
+
+        findings = sorted(grouped.values(), key=lambda item: (-item["score"], item["module"].lower()))
+        display = [
+            [
+                item["module"],
+                str(item["entry_count"]),
+                item["risk"],
+                ", ".join(item["sample_symbols"]) or "—",
+                item["rationale"],
+            ]
+            for item in findings
+        ]
+        display = self._keep(display, 2)
+        TerminalUI.table(
+            ["Target module", "Entries", "Risk", "Sample symbols", "Rationale"],
+            display,
+            max_rows=25,
+        )
+        return {
+            "ok": True,
+            "total_entries": len(rows),
+            "foreign_module_count": len(findings),
+            "findings": findings,
+        }
+
 
     # ------------------------- Scorer functions --------------------------
 
@@ -594,6 +670,13 @@ class OverviewAnalysis:
 
     # The four discovery sources psxview cross-checks.
     PSXVIEW_SOURCES = ("pslist", "psscan", "thrdscan", "csrss")
+
+    # SSDT entries normally resolve into one of these Windows kernel modules.
+    # Normalize optional .exe/.sys suffixes before comparison. An empty or
+    # unresolved module is unknown evidence and is not scored.
+    TRUSTED_SSDT_MODULES = frozenset({
+        "ntoskrnl", "win32k", "win32kbase", "win32kfull",
+    })
 
     @staticmethod
     def _record_evidence(evidence: Dict[str, Tuple[int, str, str]], family: str,
@@ -697,7 +780,8 @@ class OverviewAnalysis:
             # --- parent missing from the census (scored once) -----------------
             # This used to be scored twice by two rules testing the same condition,
             # so every orphan carried 12-14 points and a duplicated flag.
-            if ppid is not None and ppid not in pid_set:
+            # PID 0 is the kernel root, not a missing user-mode parent.
+            if ppid not in (None, 0) and ppid not in pid_set:
                 self._record_evidence(
                     evidence, "lineage", 4, "ZB",
                     "Parent PID is not present in the census (orphan).")
@@ -742,6 +826,22 @@ class OverviewAnalysis:
                         evidence, "lineage", 4, "WP",
                         f"Unexpected child of {parent}.")
 
+            # A script interpreter launching a native executable from an external
+            # volume or UNC share is materially stronger than either fact alone.
+            # Keep it in the lineage family so it cannot stack with a second rule
+            # describing the same parent/child relationship.
+            external_path = bool(re.match(r"^[d-z]:\\", path.lower())) or path.startswith("\\\\")
+            native_child = ntpath.splitext(ntpath.basename(path.strip().strip('"\'')))[1].lower() \
+                in {".exe", ".com", ".scr"}
+            script_parents = {
+                "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe",
+                "cscript.exe", "mshta.exe",
+            }
+            if parent in script_parents and external_path and native_child:
+                self._record_evidence(
+                    evidence, "lineage", 6, "SCRIPT_CHILD_EXTERNAL",
+                    f"{parent} launched a native executable from an external or network path.")
+
             score, flags, reasons = self._finish_evidence(evidence)
 
             if score > 0 and pid is not None and pid not in emitted:
@@ -758,7 +858,7 @@ class OverviewAnalysis:
                                       if pid not in pid_set and psscan_exited.get(pid)])
                                  if psscan_ran else None),
             "orphans": len([1 for pid, b in census.items()
-                            if b.get("ppid") is not None and b.get("ppid") not in pid_set]),
+                            if b.get("ppid") not in (None, 0) and b.get("ppid") not in pid_set]),
             "psxview_inconsistent": len(psx_false) if psxview_ran else None,
             "with_path": len([1 for b in census.values() if b.get("path")]),
         }
@@ -809,6 +909,25 @@ class OverviewAnalysis:
             elif j - i:      # a second mismatch
                 return False
         return True
+
+    def _score_ssdt_entry(self, row: Dict[str, Any]) -> Tuple[int, str, str]:
+        """Score one resolved SSDT target without treating missing data as a hook."""
+        module = str(row.get("Module") or "").strip()
+        symbol = str(row.get("Symbol") or "").strip()
+        address = self._as_int(row.get("Address"))
+        if not module or not symbol or address is None or address <= 0:
+            return 0, "", "Incomplete SSDT attribution"
+
+        module_name = ntpath.basename(module.replace("/", "\\")).lower()
+        module_stem = ntpath.splitext(module_name)[0]
+        if module_stem in self.TRUSTED_SSDT_MODULES:
+            return 0, "", "Expected Windows kernel target"
+
+        return (
+            10,
+            "SSDT_FOREIGN_MODULE",
+            f"SSDT target {symbol} resolves to non-baseline module {module}",
+        )
 
     ###############################################################
 
@@ -1034,10 +1153,12 @@ class OverviewAnalysis:
                         evidence, "listener", 6, "HighPortListener",
                         f"High-port listener {lp_i} by {owner}")
 
-            # Public ESTABLISHED with no PID (netscan orphan) – treat as major
+            # Missing attribution is an evidence-quality warning, not a threat
+            # behavior. Pool residue and process teardown produce many of these,
+            # so it cannot surface an otherwise ordinary public connection.
             if state == "ESTABLISHED" and public_remote and (pid in (None, "", 0)):
                 self._record_evidence(
-                    evidence, "attribution", 8, "PublicNoPID",
+                    evidence, "attribution", 3, "PublicNoPID",
                     f"Public ESTABLISHED with no PID to {fip}")
 
             # Outbound to admin/service ports on the public internet (workstations usually shouldn't)
@@ -1067,9 +1188,14 @@ class OverviewAnalysis:
                         evidence, "remote_service", 3, "UncommonPort",
                         f"Uncommon destination port {fp_i} to public {fip}")
 
-            # Public/established is context, not a second major signal. It only
-            # contributes after some independently testable property was found.
-            if state == "ESTABLISHED" and public_remote and evidence:
+            # Public/established is context, not a second major signal. Missing
+            # attribution already depends on the same public connection, so it is
+            # not independent corroboration and cannot unlock these points.
+            behavioral_evidence = any(
+                family in evidence
+                for family in ("listener", "remote_service", "process_behavior")
+            )
+            if state == "ESTABLISHED" and public_remote and behavioral_evidence:
                 self._record_evidence(
                     evidence, "connection_context", 2, "EstablishedPublic",
                     f"Established to public IP {fip}")
@@ -1089,7 +1215,10 @@ class OverviewAnalysis:
 
         # Volume is only corroboration. Busy browsers, update clients, and servers
         # routinely exceed these counts, so volume cannot create a finding alone.
-        primary = any(f in evidence for f in ("listener", "attribution", "remote_service", "process_behavior"))
+        primary = any(
+            family in evidence
+            for family in ("listener", "remote_service", "process_behavior")
+        )
         if primary:
             if conn_count >= 50:
                 self._record_evidence(
@@ -1134,19 +1263,42 @@ class OverviewAnalysis:
         # --- classifiers ---
         lolbins = ("powershell.exe","pwsh.exe","cmd.exe","wscript.exe","cscript.exe","mshta.exe",
                 "rundll32.exe","regsvr32.exe","msbuild.exe","wmic.exe","bitsadmin.exe","schtasks.exe")
-        risky_patterns = (
-            r"(?:^|\s)-(?:enc|encodedcommand)(?:\s|$)",
-            r"\bfrombase64string\b", r"(?:^|\s)iex(?:\s|\()",
-            r"(?:^|\s)-(?:nop|noprofile)(?:\s|$)",
-            r"(?:^|\s)-(?:w|windowstyle)\s+hidden(?:\s|$)",
-            r"(?:^|\s)-(?:executionpolicy|ep)\s+bypass(?:\s|$)",
-            r"\bbitsadmin\s+/transfer\b",
+        argument_patterns = (
+            (r"(?:^|\s)-(?:enc|encodedcommand)(?:\s|$)", 10, "ENCODED",
+             "Encoded command argument"),
+            (r"\bfrombase64string\b", 9, "DECODE",
+             "Base64 decoding primitive in arguments"),
+            (r"(?:^|\s)iex(?:\s|\()", 8, "IEX",
+             "PowerShell Invoke-Expression alias in arguments"),
+            (r"(?:^|\s)-(?:nop|noprofile)(?:\s|$)", 2, "NOPROFILE",
+             "PowerShell profile loading disabled"),
+            (r"(?:^|\s)-(?:w|windowstyle)\s+hidden(?:\s|$)", 4, "HIDDEN",
+             "Hidden-window argument"),
+            (r"(?:^|\s)-(?:executionpolicy|ep)\s+bypass(?:\s|$)", 4,
+             "POLICY_BYPASS", "PowerShell execution-policy bypass argument"),
         )
 
         action_name    = ntpath.basename(la.strip().strip('"\''))
         action_stem    = ntpath.splitext(action_name)[0]
         is_lolbin      = action_stem in {ntpath.splitext(name)[0] for name in lolbins}
-        has_risky      = any(re.search(pattern, aa) for pattern in risky_patterns)
+        argument_matches = [
+            (weight, flag, rationale)
+            for pattern, weight, flag, rationale in argument_patterns
+            if re.search(pattern, aa)
+        ]
+        # Scheduled-task renderers separate Action from Action Arguments. Accept
+        # both the canonical split form (bitsadmin.exe + /transfer ...) and a
+        # wrapper form (cmd.exe + bitsadmin /transfer ...), without treating a
+        # bare bitsadmin invocation as a transfer.
+        bits_transfer = (
+            action_stem == "bitsadmin"
+            and bool(re.search(r"(?:^|\s)/transfer(?:\s|$)", aa))
+        ) or bool(re.search(r"\bbitsadmin(?:\.exe)?\s+/transfer(?:\s|$)", aa))
+        if bits_transfer:
+            argument_matches.append(
+                (9, "BITS_TRANSFER", "BITS transfer command in arguments"))
+        has_argument_signal = bool(argument_matches)
+        has_major_argument = any(weight >= 8 for weight, _, _ in argument_matches)
         has_script     = bool(re.search(r"\.(?:ps1|vbs|js|jse|wsf|hta|bat|cmd|psm1)(?:['\"]?\s|$)", aa))
         has_remote_url = ("http://" in aa) or ("https://" in aa)
 
@@ -1175,18 +1327,16 @@ class OverviewAnalysis:
         in_profile_hint = any(t in ((la + aa)) for t in ("\\appdata\\","\\temp\\","\\users\\public\\","\\downloads\\","\\desktop\\"))
         autostart = any(x in trig.lower() for x in ("logon","startup","boot"))
         priv_prin = any(x in (princ or "").lower() for x in ("system","administrator","adm","local service","network service"))
-        hidden    = (" hidden" in aa) or ("-w hidden" in aa) or ("-windowstyle hidden" in aa)
-        rundll_dll = ("rundll32.exe" in la) and (".dll" in aa or ".dll" in la)
-        regsvr_dll = ("regsvr32.exe" in la) and (".dll" in aa)
+        rundll_dll = action_stem == "rundll32" and (".dll" in aa or ".dll" in la)
+        regsvr_dll = action_stem == "regsvr32" and ".dll" in aa
 
         is_microsoft_default   = na.startswith("\\microsoft\\windows\\")
         looks_system32_action  = ("\\windows\\system32" in la) or ("system32\\" in la)
 
         # --- MAJOR ---
-        if has_risky:
+        for weight, flag, rationale in argument_matches:
             self._record_evidence(
-                evidence, "payload", 10, "OBFUSCATED",
-                "Obfuscated or policy-bypassing command arguments")
+                evidence, "payload", weight, flag, rationale)
         if has_remote_url:
             self._record_evidence(
                 evidence, "payload", 9, "REMOTE",
@@ -1201,7 +1351,7 @@ class OverviewAnalysis:
                 evidence, "location", 1, "USERINSTALL", "Per-user install directory")
 
         # --- Synergy ---
-        if is_lolbin and (has_risky or has_remote_url):
+        if is_lolbin and (has_argument_signal or has_remote_url):
             self._record_evidence(
                 evidence, "execution", 6, "LOLBIN",
                 f"LOLBin used with suspicious content ({act})")
@@ -1215,7 +1365,6 @@ class OverviewAnalysis:
         if in_profile_hint: context.append("User profile path")
         if autostart: context.append(f"Auto-start trigger: {trig}")
         if priv_prin: context.append(f"Privileged principal: {princ}")
-        if hidden and not has_risky: context.append("Hidden window")
         if context:
             self._record_evidence(
                 evidence, "context", min(3, len(context)), "CONTEXT", "; ".join(context))
@@ -1229,7 +1378,10 @@ class OverviewAnalysis:
         score, _, why = self._finish_evidence(evidence)
 
         # --- Benign Microsoft/system32 cap (no major => cap to Low) ---
-        no_major = not (has_risky or has_script or has_remote_url or (non_system_payload and not vendor_install))
+        no_major = not (
+            has_major_argument or has_script or has_remote_url
+            or (non_system_payload and not vendor_install)
+        )
         if is_microsoft_default and looks_system32_action and no_major:
             score = min(score, 4)
             if "Microsoft default/system32 baseline" not in why:
@@ -1312,28 +1464,28 @@ class OverviewAnalysis:
         STARTUP_TOKENS  = ("\\start menu\\programs\\startup\\",)
 
         if any_in(n_lower, TEMP_TOKENS):
-            self._record_evidence(evidence, "location", 10, "TEMP", "Temp-like directory")
+            self._record_evidence(evidence, "location", 7, "TEMP", "Temp-like directory")
         if any_in(n_lower, DOWNLOAD_TOKENS):
-            self._record_evidence(evidence, "location", 10, "DOWNLOADS", "Downloads directory")
+            self._record_evidence(evidence, "location", 7, "DOWNLOADS", "Downloads directory")
         if any_in(n_lower, DESKTOP_TOKENS):
-            self._record_evidence(evidence, "location", 8, "DESKTOP", "Desktop directory")
+            self._record_evidence(evidence, "location", 5, "DESKTOP", "Desktop directory")
         if any_in(n_lower, PUBLIC_TOKENS):
-            self._record_evidence(evidence, "location", 8, "PUBLIC", "Public user directory")
+            self._record_evidence(evidence, "location", 7, "PUBLIC", "Public user directory")
         if any_in(n_lower, RECYCLE_TOKENS):
-            self._record_evidence(evidence, "location", 10, "RECYCLE", "$Recycle.Bin directory")
+            self._record_evidence(evidence, "location", 8, "RECYCLE", "$Recycle.Bin directory")
         if any_in(n_lower, STARTUP_TOKENS):
             self._record_evidence(evidence, "location", 8, "STARTUP", "Startup folder")
 
         # MAJOR: non-system or network
         if (re.match(r"^[d-z]:\\", n_lower) or n_lower.startswith("\\\\")) and not has_system_kf_prefix:
             self._record_evidence(
-                evidence, "location", 10, "NONSYSTEM", "Non-system or network location")
+                evidence, "location", 7, "NONSYSTEM", "Non-system or network location")
 
         # MAJOR: generic non-system
         try:
             if not has_system_kf_prefix and not_system_path(n_norm):
                 if "location" not in evidence:
-                    self._record_evidence(evidence, "location", 7, "NONSYSTEM", "Non-system path")
+                    self._record_evidence(evidence, "location", 5, "NONSYSTEM", "Non-system path")
         except Exception:
             pass
 

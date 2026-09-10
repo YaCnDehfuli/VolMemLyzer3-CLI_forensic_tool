@@ -46,7 +46,10 @@ def _steps_from_arg(s: Optional[str]) -> list[int] | None:
     out: list[int] = []
     for tok in (x.strip().lower() for x in s.split(",") if x.strip()):
         if tok.isdigit():
-            out.append(int(tok))
+            step = int(tok)
+            if step not in range(6):
+                raise ValueError(f"Unknown step token: {tok}")
+            out.append(step)
         else:
             alias = {
                 "bearings": 0, "info": 0,
@@ -54,7 +57,7 @@ def _steps_from_arg(s: Optional[str]) -> list[int] | None:
                 "injections": 2, "malfind": 2,
                 "network": 3, "net": 3, "netscan": 3,
                 "persistence": 4, "reg": 4, "tasks": 4,
-                "kernel": 5, "report": 6,
+                "kernel": 5, "ssdt": 5,
             }.get(tok)
             if alias is None:
                 raise ValueError(f"Unknown step token: {tok}")
@@ -240,7 +243,7 @@ def _usage_hint(mode: str) -> str:
     return ('Example:\n'
             '  volmemlyzer --vol-path "C:\\Path\\to\\volatility3\\vol.py" --renderer json --timeout 600 -j 4 \\\n'
             '    analyze --image "D:\\Dumps\\host.vmem" --outdir "D:\\Dumps\\.volmemlyzer" \\\n'
-            '    --steps 0,1,2,3,4 --json --no-cache')
+            '    --steps 0,1,2,3,4,5 --json --no-cache')
 
 def handle_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """
@@ -597,11 +600,11 @@ def show_help() -> None:
     analyze_block = (
         "-i, --image FILE   required\n"
         "-o, --outdir DIR   artifacts dir\n"
-        "--steps LIST       0–6 or aliases\n"
+        "--steps LIST       0–5 or aliases\n"
         "--no-cache         fresh runs\n"
         "--min-risk BAND    low|medium|high|critical\n"
         "--high-level       same as --min-risk high\n"
-        "--deep             add psxview (slow)\n"
+        "--deep             add pool/cross-view scanners and SSDT\n"
         "--json             write analysis JSON"
     )
     run_block = (
