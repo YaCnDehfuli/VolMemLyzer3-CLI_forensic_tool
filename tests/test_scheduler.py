@@ -233,10 +233,10 @@ def test_the_steps_do_not_re_run_what_prefetch_already_collected():
     eng._prefetch(pipe, "img.raw", "/out", steps=[1, 2], use_cache=True,
                   concurrency=4, deep=False)
 
-    assert sorted(pipe.launches) == ["malfind", "pslist", "psscan", "pstree"]
+    assert sorted(pipe.launches) == ["malfind", "pslist", "pstree"]
     # malfind is what step 2 reads; it must come from the prefetch, not a new run.
     assert eng._ensure_one(pipe, "img.raw", "/out", "malfind", True) == "/out/malfind.json"
-    assert sorted(pipe.launches) == ["malfind", "pslist", "psscan", "pstree"]
+    assert sorted(pipe.launches) == ["malfind", "pslist", "pstree"]
 
 
 def test_prefetch_collects_every_requested_step_in_one_run():
@@ -248,7 +248,32 @@ def test_prefetch_collects_every_requested_step_in_one_run():
     pipe = _RecordingPipe(names)
     eng._prefetch(pipe, "img.raw", "/out", steps=[0, 1, 2, 3, 4], use_cache=True,
                   concurrency=4, deep=False)
+    assert sorted(pipe.launches) == sorted([
+        "info", "pslist", "pstree", "malfind", "registry.hivelist",
+        "scheduled_tasks", "registry.userassist",
+    ])
+
+
+def test_deep_prefetch_adds_pool_scanners_and_ssdt():
+    from volmemlyzer.analysis import OverviewAnalysis
+    eng = OverviewAnalysis()
+    names = ["info", "pslist", "pstree", "psscan", "psxview", "malfind", "netscan",
+             "registry.hivelist", "registry.hivescan", "scheduled_tasks",
+             "registry.userassist", "ssdt"]
+    pipe = _RecordingPipe(names)
+    eng._prefetch(pipe, "img.raw", "/out", steps=[0, 1, 2, 3, 4, 5], use_cache=True,
+                  concurrency=4, deep=True)
     assert sorted(pipe.launches) == sorted(names)
+
+
+def test_analysis_step_parser_accepts_kernel_aliases_and_rejects_unknown_steps():
+    from volmemlyzer.cli import _steps_from_arg
+
+    assert _steps_from_arg("0,kernel,ssdt,5") == [0, 5]
+    with pytest.raises(ValueError, match="Unknown step token: 6"):
+        _steps_from_arg("6")
+    with pytest.raises(ValueError, match="Unknown step token: report"):
+        _steps_from_arg("report")
 
 
 def test_psxview_is_only_collected_with_deep():
