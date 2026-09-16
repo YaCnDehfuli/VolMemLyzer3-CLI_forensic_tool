@@ -7,6 +7,54 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-09-16
+
+One scoring engine. `OverviewAnalysis` used to carry a complete second
+implementation of scoring beside `volmemlyzer.scoring`, so the same image could
+be scored by different rules depending on which entry point you came through.
+That implementation is gone and the analysis steps read the engine.
+
+### Added
+
+- `--preset conservative|balanced|aggressive` on `analyze`, exposing the tuning
+  profile's sensitivity: risk-band cut-offs, the confidence floor, and
+  per-category surfacing thresholds move together.
+- `Hit.subject` / `Contribution.subject` — the artifact row a rule fired on (a
+  malfind region's Start VPN, an SSDT entry's target module). A per-region view
+  no longer has to recover it by parsing the evidence prose. Additive.
+- `volmemlyzer.scoring.catalog.connection_key`, so a caller holding raw netscan
+  rows can join them to the scored object without respelling its identity.
+- Step results carry the engine's ATT&CK roll-up, the effective profile, and the
+  plugins no rule could read (`unevaluated_sources`).
+
+### Changed
+
+- Findings carry the ATT&CK technique of the rule that produced them, rather
+  than one constant per category. A process flagged for an lsass handle is no
+  longer reported as Masquerading.
+- `--min-risk` and `--high-level` are implemented against the tuning profile.
+  They mean what they meant; the ladder now has one definition.
+- UserAssist tool matching is by basename stem with a trailing 32/64 stripped,
+  restoring the full 35-name list the scoring merge had cut to twelve — pafish,
+  seatbelt, plink, adfind and pwdump are recognised again. More precise than the
+  substring test it replaces: "nc" inside "concat" is not netcat.
+
+### Removed
+
+- **Breaking.** `OverviewAnalysis` no longer scores: every `_score_*` method,
+  `SURFACE_THRESHOLDS`, `RISK_BANDS`, `MIN_RISK`, `_risk_from_score`,
+  `_score_map`, `_keep` and their private helpers. `MAX_RISK_SCORE` and the
+  bands come from `volmemlyzer.scoring`. Step payloads keep their shapes and
+  gain per-row score, confidence and techniques; step 2 findings gain
+  `start_vpn`.
+
+### Notes
+
+The engine itself landed in 3.2.0 (merged rule model, MITRE attribution) and was
+calibrated in 3.3.0 against a reference image; neither was published. Scoring is
+unchanged by this release: `score_records` over the reference artifacts is
+identical per object, contribution and weight.
+
 ## [3.1.0] - 2026-09-10
 
 This release makes the analyst-facing triage layer bounded, inspectable, and
@@ -75,6 +123,7 @@ This is not a new PyPI upload.
 - Windows paths resolved as the image wrote them, not as the host spells them.
 - Progress bar no longer archived as an artifact.
 
-[Unreleased]: https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases/tag/v4.0.0
 [3.1.0]: https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases/tag/v3.1.0
 [3.0.1]: https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases/tag/v3.0.1

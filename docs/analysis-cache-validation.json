@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "volmemlyzer_version": "3.9.0",
+  "volmemlyzer_version": "4.0.0",
   "method": "Direct invocation of volmemlyzer.scoring.score_records over cached Volatility JSON; no UI and no Volatility rerun. OverviewAnalysis no longer scores \u2014 it orchestrates the plugins and renders this engine's output, so the CLI and MemTriage now read one set of verdicts.",
   "profile": {
     "preset": "balanced",

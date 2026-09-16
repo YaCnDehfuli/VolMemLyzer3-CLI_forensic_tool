@@ -13,4 +13,4 @@ __all__ = [
     "diff_scored",
     "score_records",
 ]
-__version__ = "3.9.0"
+__version__ = "4.0.0"
