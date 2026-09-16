@@ -108,21 +108,36 @@ def _core_masquerade_name(ctx: TriageContext) -> list[Hit]:
 # =====================================================================
 
 def _hidden_process(ctx: TriageContext) -> list[Hit]:
+    """A pool-scan-only process that has *not* exited.
+
+    The original fired on every psscan-only PID and said so in its own evidence
+    string — "hidden or terminated". On a live image most of those are simply
+    processes that ended before capture, and scoring them as unlinked put ten
+    ordinary exits in the table alongside the one finding that mattered.
+    VolMemLyzer separated the two (HK vs TERM); this restores that distinction.
+    """
     hits: list[Hit] = []
     for p in ctx.procs.values():
-        if p.in_psscan and not p.in_pslist:
+        if p.in_psscan and not p.in_pslist and not p.exited:
             hits.append(Hit(str(p.pid), ctx.label(p.pid),
-                            "Present in psscan pool scan but absent from the "
-                            "pslist EPROCESS walk (hidden or terminated)", pid=p.pid))
+                            "Present in the psscan pool scan, absent from the pslist "
+                            "EPROCESS walk, and carries no exit time — unlinked rather "
+                            "than terminated", pid=p.pid))
     return hits
+
+
+# psxview cross-checks four discovery sources. A process that has simply exited
+# is legitimately missing from one of them, so a single False is the normal case
+# and not a finding; two or more disagreeing is the anomaly.
+_PSXVIEW_MIN_DISAGREEING = 2
 
 
 def _psxview_inconsistent(ctx: TriageContext) -> list[Hit]:
     hits: list[Hit] = []
     for p in ctx.procs.values():
-        if p.psxview_false:
+        if len(p.psxview_false) >= _PSXVIEW_MIN_DISAGREEING:
             hits.append(Hit(str(p.pid), ctx.label(p.pid),
-                            "Discovery-source inconsistency (psxview): "
+                            f"{len(p.psxview_false)} discovery sources disagree (psxview): "
                             f"{', '.join(p.psxview_false)} = False", pid=p.pid))
     return hits
 
@@ -761,9 +776,17 @@ _FAMILIES: dict[str, str] = {
 #
 #   net_high_port_listener  any app with an ephemeral listener
 #   net_fanout              a browser talking to one CDN
+#   psxview_inconsistent    thrdscan and csrss legitimately miss many live
+#                           processes; against the reference image this alone
+#                           accounted for 18 of 25 surfaced rows. VolMemLyzer
+#                           reached the same place by weighting it 8 under a
+#                           threshold of 9, so it could never surface by itself
+#                           either — this states that intent directly instead of
+#                           leaving it to arithmetic.
 _CONTEXT_ONLY: frozenset[str] = frozenset({
     "net_high_port_listener",
     "net_fanout",
+    "psxview_inconsistent",
 })
 
 

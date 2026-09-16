@@ -37,35 +37,89 @@ def normalize_plugin_key(name: str) -> str:
     return _ALIASES.get(key, key)
 
 
-def score_records(records: dict[str, list[dict]], profile: dict | None = None) -> dict:
+def score_records(records: dict[str, list[dict]], profile: dict | None = None,
+                  plugins: list[str] | tuple[str, ...] | None = None) -> dict:
     """Score parsed plugin records under a profile → explained, JSON-ready view.
 
     Returns keys: ``scored_objects``, ``attack_techniques``, ``risk_summary``,
-    ``profile`` (the effective profile echoed back), and ``process_risk`` (a
-    pid→verdict map used to enrich the process inventory).
+    ``profile`` (the effective profile echoed back), ``process_risk`` (a
+    pid→verdict map that enriches a process inventory) and
+    ``unevaluated_sources``.
+
+    ``plugins`` is the selected extraction plan, when the caller has one. A rule
+    keyed to a plugin nobody selected had no evidence to read and could not fire
+    — which is a different claim from the rule running and finding nothing, and
+    the caller has to be able to tell a reader which one happened.
     """
     prof = TuningProfile.from_dict(profile) if profile else TuningProfile.from_preset("balanced")
     ctx = build_context(records)
-    result = ScoringEngine().score(ctx, prof)
-    objects = result.surfaced()
+    engine = ScoringEngine()
+    result = engine.score(ctx, prof)
+
+    # One verdict per process the rules ran against, not only the shortlist.
+    # A process can be named by several findings; the row carries the strongest
+    # score, since the ladder is ordinal, and the union of what fired.
+    findings_by_pid: dict[int, list[dict]] = {}
+    for o in (obj.to_dict() for obj in result.all_objects):
+        pid = o.get("pid")
+        if pid is not None:
+            findings_by_pid.setdefault(int(pid), []).append(o)
 
     process_risk: dict[int, dict] = {}
-    for o in objects:
-        if o["object_type"] == "process" and o["pid"] is not None:
-            process_risk[int(o["pid"])] = {
-                "risk": o["risk"],
-                "score": o["score"],
-                "confidence": o["confidence"],
-                "techniques": o["techniques"],
-                "flags": [c["rule_id"] for c in o["contributions"]],
+    for pid in ctx.procs:
+        found = findings_by_pid.get(int(pid)) or []
+        if not found:
+            process_risk[int(pid)] = {
+                "state": "no_indicator_fired", "risk": None, "score": 0,
+                "confidence": None, "techniques": [], "flags": [],
             }
+            continue
+        strongest = max(found, key=lambda o: o["score"])
+        flags: list[str] = []
+        techniques: list[str] = []
+        for o in found:
+            # Every rule that fired, superseded or not. Family dedup decides what
+            # *scores*; it does not decide what was observed, and dropping the
+            # weaker observation here would hide a real finding from the analyst
+            # rather than merely stop it being counted twice.
+            for c in o["contributions"]:
+                if c["rule_id"] not in flags:
+                    flags.append(c["rule_id"])
+            for t in o["techniques"]:
+                if t not in techniques:
+                    techniques.append(t)
+        process_risk[int(pid)] = {
+            "state": "scored",
+            "risk": strongest["risk"],
+            "score": strongest["score"],
+            "confidence": max(o["confidence"] for o in found),
+            "techniques": techniques,
+            "flags": flags,
+        }
+
     return {
-        "scored_objects": objects,
+        "scored_objects": result.surfaced(),
         "attack_techniques": result.attack_techniques,
         "risk_summary": result.risk_summary,
         "profile": result.profile,
         "process_risk": process_risk,
+        "unevaluated_sources": unevaluated_sources(engine.rules, records, plugins),
     }
+
+
+def unevaluated_sources(rules, records: dict[str, list[dict]],
+                        plugins: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Plugins the rules read that this run has no evidence from.
+
+    Reported once, as a property of the run: the gap is identical for every
+    object, so repeating it per row would state a fact about the extraction as
+    if it were a finding about the artifact.
+    """
+    available = {normalize_plugin_key(p) for p in (plugins if plugins is not None else records)}
+    wanted: set[str] = set()
+    for rule in rules:
+        wanted.update(normalize_plugin_key(s) for s in rule.data_sources)
+    return sorted(wanted - available)
 
 
 def diff_scored(prev_objects: list[dict], cur_objects: list[dict]) -> dict:

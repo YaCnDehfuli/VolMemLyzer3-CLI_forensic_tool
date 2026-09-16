@@ -61,6 +61,9 @@ class ProcInfo:
     wow64: bool | None = None
     in_pslist: bool = False
     in_psscan: bool = False
+    # psscan records an ExitTime for a process that has already gone. A
+    # psscan-only PID that exited is terminated, not hidden — see _hidden_process.
+    exited: bool = False
     psxview_false: list[str] = field(default_factory=list)
 
     @property
@@ -130,6 +133,9 @@ def _merge_census(procs: dict[int, ProcInfo], records: list[dict], *, in_pslist:
             p.in_pslist = True
         if in_psscan:
             p.in_psscan = True
+            exit_time = g(r, "ExitTime", "Exit Time", "exit_time")
+            if exit_time and str(exit_time).strip() not in ("N/A", "-"):
+                p.exited = True
 
 
 def build_context(records: dict[str, list[dict]]) -> TriageContext:

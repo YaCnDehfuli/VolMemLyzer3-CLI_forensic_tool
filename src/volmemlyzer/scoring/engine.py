@@ -58,6 +58,11 @@ def _noisy_or(confidences: list[float]) -> float:
 @dataclass
 class ScoringResult:
     objects: list[ScoredObject] = field(default_factory=list)
+    # Everything that scored, including objects below the surfacing floor. The
+    # IoC table is a shortlist; an inventory has to report a verdict for each
+    # object the rules actually ran against, or a blank cell cannot be told
+    # apart from one that was never evaluated.
+    all_objects: list[ScoredObject] = field(default_factory=list)
     attack_techniques: list[dict] = field(default_factory=list)
     risk_summary: dict = field(default_factory=dict)
     profile: dict = field(default_factory=dict)
@@ -168,6 +173,7 @@ class ScoringEngine:
 
         return ScoringResult(
             objects=surfaced,
+            all_objects=sorted(objects, key=lambda o: (o.score, o.confidence), reverse=True),
             attack_techniques=self._attack(surfaced),
             risk_summary=self._summary(surfaced),
             profile=profile.to_dict(),

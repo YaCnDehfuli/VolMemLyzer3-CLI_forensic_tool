@@ -30,9 +30,12 @@ _PRESET_FLOOR: dict[str, float] = {
     "conservative": 0.55, "balanced": 0.35, "aggressive": 0.2,
 }
 # Minimum score for an object of each type to be *surfaced* in the IoC table.
-# Kept low on purpose: the *risk band* communicates severity, the threshold only
-# filters the weakest lone signals (the confidence floor does the rest). One
-# strong (severity-4) signal surfaces as Low; corroboration lifts the band.
+# Kept below the weight of one strong rule on purpose: the *risk band* carries
+# severity, and a lone severity-4 signal — an unlinked process, an orphaned hive
+# — has to be able to reach the table as Low. The threshold only filters the
+# weakest lone signals; the confidence floor and the rules' own specificity do
+# the rest. Raising it instead of fixing an over-firing rule hides that rule's
+# real hits along with its noise.
 _PRESET_THRESHOLDS: dict[str, dict[str, int]] = {
     "conservative": {"process": 9, "connection": 8, "persistence": 5, "kernel": 9},
     "balanced": {"process": 4, "connection": 5, "persistence": 2, "kernel": 9},
