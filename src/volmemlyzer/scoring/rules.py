@@ -56,6 +56,13 @@ class Hit:
     label: str          # human label, e.g. "evil.exe (1337)"
     evidence: str       # analyst-facing reason, quoting the artifact
     pid: int | None = None
+    # Which artifact row inside the object this observation came from — a
+    # malfind region's Start VPN, an SSDT entry's target module. An object is
+    # scored as a whole (a process, not each of its regions), but a reader still
+    # has to be able to ask *which* region, and recovering that by parsing the
+    # evidence prose would be a second, divergent source of truth. Empty when
+    # the rule speaks about the object as a whole.
+    subject: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,6 +116,7 @@ class Contribution:
     family: str = ""
     context_only: bool = False
     superseded: bool = False    # a stronger rule in the same family outscored it
+    subject: str = ""           # the artifact row this fired on — see Hit.subject
 
     def to_dict(self) -> dict:
         return {
@@ -116,6 +124,7 @@ class Contribution:
             "title": self.title,
             "weight": round(self.weight, 2),
             "evidence": self.evidence,
+            "subject": self.subject,
             "mitre": {
                 "technique_id": self.technique_id,
                 "technique_name": self.technique_name,

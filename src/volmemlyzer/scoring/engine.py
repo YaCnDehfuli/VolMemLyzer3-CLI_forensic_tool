@@ -115,6 +115,7 @@ class ScoringEngine:
                     technique_name=rule.technique_name, tactic=rule.tactic,
                     severity=rule.severity, confidence=rule.confidence,
                     family=rule.hypothesis, context_only=rule.context_only,
+                    subject=hit.subject,
                 ))
                 grp["fired"].add(rule.id)
 

@@ -113,17 +113,25 @@ Use `--no-cache` to force fresh plugin runs. Supported step aliases include
 
 ### Reading the risk column
 
-Every step scores findings on one ladder — Low, Medium (9), High (14), Critical
-(20) — and only tables a row once it reaches Medium. `--min-risk` raises that
-floor (`--high-level` is the same thing as `--min-risk high`).
+One engine scores every artifact: `volmemlyzer.scoring`. A rule is data — it
+carries its own ATT&CK technique, a severity and a source confidence, and a pure
+predicate — so each row says which rules fired, what they read, and what they
+map to, instead of a per-step constant. The steps orchestrate the plugins and
+render that output; they do not score.
+
+Findings sit on one ladder — Low, Medium (9), High (14), Critical (20).
+`--min-risk` raises the floor (`--high-level` is the same thing as `--min-risk
+high`), and `--preset conservative|balanced|aggressive` moves the band cut-offs,
+the confidence floor and the per-category surfacing thresholds together.
 
 **These bands surface signal for review. They are not detections.** A Critical
 row means several unusual things line up on one object, not that it is
 malicious; plenty of legitimate software will land in the table, and a quiet
-table is not a clean machine. Thresholds live in
-`OverviewAnalysis.SURFACE_THRESHOLDS` and the path lists in
-`utilities.SUSPICIOUS_DIRS` / `USER_INSTALL_SUBDIRS`, so tuning for your estate
-is a data edit rather than a code change.
+table is not a clean machine. Bands and thresholds live in
+`volmemlyzer.scoring.profile`, individual rule weights in a profile's
+`rule_overrides`, and the path lists in `utilities.SUSPICIOUS_DIRS` /
+`USER_INSTALL_SUBDIRS`, so tuning for your estate is a data edit rather than a
+code change.
 
 The complete security-logic specification—including every rule, weight, regular
 expression, evidence family, ATT&CK alignment, false-positive control, and

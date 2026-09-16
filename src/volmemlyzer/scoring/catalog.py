@@ -15,6 +15,7 @@ Forrest Orr / CyberArk on hollowing & unlinked modules, MITRE ATT&CK.
 from __future__ import annotations
 
 import ipaddress
+import re
 
 from . import heuristics as H
 from . import windows_baselines as WB
@@ -179,7 +180,8 @@ def _malfind_rwx_private(ctx: TriageContext) -> list[Hit]:
         if H.protection_is_rwx(prot) and _is_private(r):
             start = g(r, "Start VPN", "Start", default="?")
             hits.append(Hit(str(pid), ctx.label(pid),
-                            f"RWX private memory region at {start} ({prot})", pid=pid))
+                            f"RWX private memory region at {start} ({prot})", pid=pid,
+                            subject=str(start)))
     return hits
 
 
@@ -193,7 +195,7 @@ def _malfind_pe_header(ctx: TriageContext) -> list[Hit]:
             start = g(r, "Start VPN", "Start", default="?")
             hits.append(Hit(str(pid), ctx.label(pid),
                             f"MZ/PE header inside private executable region at "
-                            f"{start} (reflective PE)", pid=pid))
+                            f"{start} (reflective PE)", pid=pid, subject=str(start)))
     return hits
 
 
@@ -206,7 +208,7 @@ def _malfind_shellcode(ctx: TriageContext) -> list[Hit]:
             start = g(r, "Start VPN", "Start", default="?")
             hits.append(Hit(str(pid), ctx.label(pid),
                             f"Shellcode byte signature(s) at {start}: "
-                            f"{', '.join(sigs)}", pid=pid))
+                            f"{', '.join(sigs)}", pid=pid, subject=str(start)))
     return hits
 
 
@@ -352,6 +354,16 @@ def _is_public(ip: str) -> bool:
         return False
 
 
+def connection_key(row: dict) -> str:
+    """The identity the engine gives a netscan row's connection object.
+
+    Public because a caller holding the raw netscan rows — the CLI's networking
+    step — has to join them back to the scored object, and re-deriving this
+    format there would be a second spelling of the same identity.
+    """
+    return _conn(row)["key"]
+
+
 def _conn(row: dict) -> dict:
     proto = str(g(row, "Proto", "Protocol", default="") or "")
     fa = str(g(row, "ForeignAddr", "Foreign Address", default="") or "")
@@ -493,17 +505,38 @@ def _scheduled_task(ctx: TriageContext) -> list[Hit]:
     return hits
 
 
+# Dual-use / red-team tooling recognised by executable name. Matched against the
+# basename stem with a trailing 32/64 stripped, so pafish64.exe and nc.exe match
+# while a substring inside an unrelated word does not.
+#
+# Restored from VolMemLyzer's UserAssist scorer, which carried all of these. The
+# merge kept twelve of them, so pafish, seatbelt, plink, adfind, pwdump and the
+# rest stopped being recognised — a name the tool used to call out by name read
+# as nothing more than "non-system path".
+_OFFENSIVE_TOOL_STEMS: frozenset[str] = frozenset({
+    "mimikatz", "psexec", "procdump", "bloodhound", "sharphound", "rubeus",
+    "seatbelt", "powersploit", "empire", "crackmapexec", "cme", "koadic",
+    "evil-winrm", "lazagne", "winpeas", "nc", "ncat", "netcat", "plink", "pscp",
+    "beacon", "cobaltstrike", "metasploit", "msfvenom", "pafish", "sharpdpapi",
+    "sharpup", "sharproast", "hashdump", "pwdump", "adfind", "wce", "mimidrv",
+    "lsassy", "kerberoast",
+})
+
+
+def _is_offensive_tool(path_lower: str) -> bool:
+    stem = path_lower.replace("/", "\\").rsplit("\\", 1)[-1]
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+    return re.sub(r"(?:32|64)$", "", stem) in _OFFENSIVE_TOOL_STEMS
+
+
 def _score_userassist(name: str) -> tuple[int, list[str]]:
-    import re
     n = (name or "").replace("/", "\\")
     nl = n.lower()
     if not (re.match(r"^[a-z]:\\", nl) or nl.startswith("\\\\")
             or re.search(r"\.(exe|dll|com|bat|cmd|ps1|vbs|js|hta)$", nl)):
         return 0, []
     score, why = 0, []
-    tools = ("mimikatz", "psexec", "procdump", "bloodhound", "sharphound", "rubeus",
-             "cobaltstrike", "metasploit", "lazagne", "winpeas", "nc.exe", "ncat")
-    if any(t in nl for t in tools):
+    if _is_offensive_tool(nl):
         score += 12
         why.append("Known offensive tool name")
     for tok, w, label in (("\\temp\\", 10, "Temp directory"),
@@ -572,7 +605,8 @@ def _malfind_peb_walk(ctx: TriageContext) -> list[Hit]:
             start = g(r, "Start VPN", "Start", default="?")
             hits.append(Hit(str(pid), ctx.label(pid),
                             f"Region at {start} walks the PEB loader lists, the way "
-                            f"code with no import table finds its imports", pid=pid))
+                            f"code with no import table finds its imports", pid=pid,
+                            subject=str(start)))
     return hits
 
 
@@ -585,7 +619,7 @@ def _malfind_api_hashing(ctx: TriageContext) -> list[Hit]:
             start = g(r, "Start VPN", "Start", default="?")
             hits.append(Hit(str(pid), ctx.label(pid),
                             f"{found} pushes of hash-like constants at {start}, typical "
-                            f"of resolving imports by hash", pid=pid))
+                            f"of resolving imports by hash", pid=pid, subject=str(start)))
     return hits
 
 
@@ -605,7 +639,8 @@ def _ssdt_foreign_module(ctx: TriageContext) -> list[Hit]:
         if not H.ssdt_foreign_module(module):
             continue
         hits.append(Hit(f"ssdt:{symbol.lower()}", f"SSDT {symbol}",
-                        f"SSDT target {symbol} resolves to non-baseline module {module}"))
+                        f"SSDT target {symbol} resolves to non-baseline module {module}",
+                        subject=module))
     return hits
 
 

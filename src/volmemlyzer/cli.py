@@ -17,6 +17,7 @@ from .utilities import write_csv, write_json, _get_dumps
 from .pipeline import Pipeline
 from .runner import VolRunner
 from .analysis import OverviewAnalysis
+from .scoring.profile import PRESETS
 from .extractor_registry import ExtractorRegistry
 from .terminalUI import TerminalUI  
 from rich.text import Text
@@ -146,11 +147,15 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("-o", "--outdir", default=None, help="Artifacts directory (defaults near image)")
     a.add_argument("--steps", default=None, help="Comma list of steps (e.g. 0,1,2 or bearings,processes)")
     a.add_argument("--no-cache", action="store_true", help="Ignore cached plugin outputs")
-    a.add_argument("--min-risk", default=None, choices=["low", "medium", "high", "critical"],
+    a.add_argument("--min-risk", default=None, choices=list(OverviewAnalysis.MIN_RISK_LEVELS),
                    help="Lowest risk band to show. These bands surface signal for "
                         "review; they are not detections")
     a.add_argument("--high-level", action="store_true",
                    help="Shorthand for --min-risk high")
+    a.add_argument("--preset", default="balanced", choices=list(PRESETS),
+                   help="Scoring sensitivity. Moves the risk-band cut-offs, the "
+                        "confidence floor and the per-category surfacing "
+                        "thresholds together (default: balanced)")
     a.add_argument("--deep", action="store_true",
                    help="Add the slow cross-check plugins to the census (psxview). "
                         "psxview re-runs psscan, thrdscan and a csrss handle sweep "
@@ -361,8 +366,8 @@ def handle_analysis(args) -> int:
              args.image, outdir, (steps if steps is not None else "default"),
              "on" if not args.no_cache else "off")
 
-    analysis = OverviewAnalysis()
-    log.info("Running analysis (jobs= %s) …", args.jobs)
+    analysis = OverviewAnalysis(profile={"preset": args.preset})
+    log.info("Running analysis (jobs= %s, preset= %s) …", args.jobs, args.preset)
     res = analysis.run_steps(
         pipe=pipe,
         image_path=args.image,
@@ -572,7 +577,7 @@ def show_help() -> None:
         print("VolMemLyzer — Memory forensics over Volatility 3".center(w))
         print("USAGE  volmemlyzer [GLOBAL OPTIONS] <command> [COMMAND OPTIONS]\n")
         print("[GLOBAL] --vol-path PATH | --renderer R | --timeout SEC | -j/--jobs N | --log-level L\n")
-        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --min-risk BAND ; --deep ; --json\n")
+        print("[analyze]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --steps LIST ; --no-cache ; --min-risk BAND ; --preset NAME ; --deep ; --json\n")
         print("[run]\n  -i/--image FILE (req) ; -o/--outdir DIR ; --renderer R ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[extract]\n  -i/--image PATH (req,file|dir) ; -o/--outdir DIR ; -f/--format FMT(json|csv, req) ; --plugins LIST ; --drop LIST ; --no-cache\n")
         print("[list]\n  --vol ; --registry")
@@ -604,6 +609,7 @@ def show_help() -> None:
         "--no-cache         fresh runs\n"
         "--min-risk BAND    low|medium|high|critical\n"
         "--high-level       same as --min-risk high\n"
+        "--preset NAME      conservative|balanced|aggressive scoring sensitivity\n"
         "--deep             add pool/cross-view scanners and SSDT\n"
         "--json             write analysis JSON"
     )

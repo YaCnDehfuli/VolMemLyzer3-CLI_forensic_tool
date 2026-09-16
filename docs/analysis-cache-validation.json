@@ -1,54 +1,145 @@
 {
-  "schema_version": 1,
-  "analysis_commit": "e8903c1eae5647cfcd80730a3c826c380a9722a8",
-  "method": "Direct invocation of OverviewAnalysis pure scorers over cached JSON; no UI and no Volatility rerun.",
+  "schema_version": 2,
+  "volmemlyzer_version": "3.9.0",
+  "method": "Direct invocation of volmemlyzer.scoring.score_records over cached Volatility JSON; no UI and no Volatility rerun. OverviewAnalysis no longer scores \u2014 it orchestrates the plugins and renders this engine's output, so the CLI and MemTriage now read one set of verdicts.",
+  "profile": {
+    "preset": "balanced",
+    "risk_bands": {
+      "critical": 20,
+      "high": 14,
+      "medium": 9
+    },
+    "confidence_floor": 0.35,
+    "category_thresholds": {
+      "process": 4,
+      "connection": 5,
+      "persistence": 2,
+      "kernel": 9
+    }
+  },
   "captures": [
     {
       "label": "2580_5.vmem cache",
-      "quick_image_hash": "quicksha256:732099427859dfc1afb3f5c77f76c617bb6fbef5e13b6346e1cb83a26225fd9f",
       "observed_process_example": {
-        "pid": 7936,
-        "name": "malware.exe",
-        "parent_pid": 5048,
-        "parent_name": "powershell.exe",
-        "path": "Z:\\malware.exe",
-        "score": 15,
-        "risk": "High",
-        "flags": ["OP", "WOW", "SCRIPT_CHILD_EXTERNAL"]
+        "pid": 2580,
+        "label": "malware.exe (2580)",
+        "score": 13.2,
+        "score_max": 30,
+        "risk": "Medium",
+        "confidence": 0.88,
+        "techniques": [
+          "T1055"
+        ],
+        "contributions": [
+          {
+            "rule_id": "malfind_rwx_private",
+            "weight": 8.4,
+            "subject": "48889856",
+            "superseded": false
+          },
+          {
+            "rule_id": "malfind_peb_walk",
+            "weight": 4.8,
+            "subject": "48889856",
+            "superseded": false
+          }
+        ]
       },
       "surfaces": [
-        {"name": "process", "input_objects": 138, "surfaced": 3},
-        {"name": "malfind", "input_objects": 19, "surfaced": 0},
-        {"name": "netscan", "input_objects": 104, "surfaced": 0},
-        {"name": "scheduled_tasks", "input_objects": 323, "surfaced": 3},
-        {"name": "userassist", "input_objects": 103, "surfaced": 2},
-        {"name": "ssdt", "input_objects": null, "surfaced": null}
+        {
+          "name": "process",
+          "input_objects": 128,
+          "surfaced": 5
+        },
+        {
+          "name": "connection",
+          "input_objects": 104,
+          "surfaced": 1
+        },
+        {
+          "name": "persistence",
+          "input_objects": 192,
+          "surfaced": 2
+        },
+        {
+          "name": "kernel",
+          "input_objects": 0,
+          "surfaced": 0
+        }
       ],
-      "suppressed_noise": {
-        "public_established_without_pid_before": 27,
-        "public_established_without_pid_after": 0,
-        "userassist_location_only_before": 7,
-        "userassist_location_only_after": 0
-      }
+      "risk_summary": {
+        "total": 8,
+        "by_risk": {
+          "Critical": 0,
+          "High": 0,
+          "Medium": 4,
+          "Low": 4
+        },
+        "by_type": {
+          "process": 5,
+          "connection": 1,
+          "persistence": 2
+        }
+      },
+      "attack_techniques": [
+        {
+          "technique_id": "T1055",
+          "name": "Process Injection",
+          "object_count": 10
+        },
+        {
+          "technique_id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "object_count": 3
+        },
+        {
+          "technique_id": "T1053.005",
+          "name": "Scheduled Task",
+          "object_count": 3
+        },
+        {
+          "technique_id": "T1014",
+          "name": "Rootkit",
+          "object_count": 1
+        },
+        {
+          "technique_id": "T1571",
+          "name": "Non-Standard Port",
+          "object_count": 1
+        }
+      ],
+      "unevaluated_sources": [
+        "cmdline",
+        "handles",
+        "ldrmodules",
+        "privileges",
+        "ssdt",
+        "threads"
+      ]
     }
   ],
   "preserved_test_vectors": [
     {
-      "label": "PID 2580 malware.exe shellcode prefix",
-      "source": "tests/test_scorers.py",
-      "score": 14,
-      "risk": "High",
-      "flags": ["RWX", "LDRWALK"]
+      "label": "PID 2580 malware.exe, RWX private region plus a PEB loader walk",
+      "source": "tests/test_scorers.py::test_the_shellcode_region_surfaces",
+      "score": 13.2,
+      "risk": "Medium",
+      "rules": [
+        "malfind_rwx_private",
+        "malfind_peb_walk"
+      ]
     }
   ],
   "artifact_sha256": {
-    "2580_5.vmem_pslist.json": "263b5f8d46fcfca82b3be8c041be2d1641cf05850084e97e2075d8df5835f9f5",
-    "2580_5.vmem_pstree.json": "ced84242ca2289eb026ee758b98009d48b8d00798c672ff82c16d42c82b52381",
-    "2580_5.vmem_psscan.json": "847baac0aa4fd2aa62d5b20641a789f9ea72a4dae5eec13cbd8b9cb120f2752c",
-    "2580_5.vmem_psxview.json": "b29ee8fb9047d210c37f2d6f4abd7e430995a0b13ed35431a1db95284f993239",
-    "2580_5.vmem_malfind.json": "c7e6a56cd615e2c983cf79e6026e92c0f544342a0ef171587358880037a34ce7",
-    "2580_5.vmem_netscan.json": "4ab1f2d64af0eca2c68656ab67a6c22b69560b2085eb83b64589890bb4f3d091",
-    "2580_5.vmem_scheduled_tasks.json": "bfcdf7e690565e4eecec3aa5ede4e5be423bd400501e3c8006133a706cf78c68",
-    "2580_5.vmem_registry_userassist.json": "ac7b06128f6cc8e549b5c57ca7d242eb751824f8d1223730bdfde02bef04bf5f"
+    "2580_5.vmem_malfind.json": "5e77fbd61dc7128cdc4612659467d829d27d8dbd67a75b2c3f04fc714e06574a",
+    "2580_5.vmem_netscan.json": "0bd770c9dc366e44f9891a4ae02c406e0292a1b79f05dec4cc78d91679b6bfab",
+    "2580_5.vmem_pslist.json": "2bece87704326d6561b419bb047233690d4a40c0a1e9f876be41320dddebe590",
+    "2580_5.vmem_psscan.json": "70de135b5b61b3092a1601c7e239dc5cb35db630bc6de5baa4004935a628ccf9",
+    "2580_5.vmem_pstree.json": "fce7b741376d6cd2461ffb80d8cc755a5989c38474347755d9411db0296bc85a",
+    "2580_5.vmem_psxview.json": "2cc615ee2c3318c722e1d705bf6f323e013ef24c6ce86ff4bc8a92040e5a8253",
+    "2580_5.vmem_registry.hivelist.json": "71ae29a3d0fd364cfde888e645e42ef17d6467138157d3173f55a3018483a0a4",
+    "2580_5.vmem_registry.hivescan.json": "b69c679b47eeab1295a14bf03660e01a7c3b44498e9dd2f6f60710cdd72f15ac",
+    "2580_5.vmem_registry.userassist.json": "b47ed77467c6f89705a669cbeda928eeb218200d2c906ce545bbc27ae0a92391",
+    "2580_5.vmem_scheduled_tasks.json": "f56f77e37d5be43626d2c0517d0b872f350f100a05625723d2160011f0d5d7e3"
   }
 }

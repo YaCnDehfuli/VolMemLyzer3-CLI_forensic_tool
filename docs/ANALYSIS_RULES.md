@@ -68,22 +68,27 @@ The shared score ladder is intentionally small and ordinal:
 | 14–19 | High | Multiple independent observations align on the same object |
 | 20–30 | Critical | Several strong, independent hypotheses align; still not a verdict |
 
-The default surface threshold is **9** for every scored source:
+Bands and surfacing thresholds belong to the tuning profile
+(`volmemlyzer.scoring.profile`), which is the single definition of the ladder.
+The Balanced preset:
 
 ```python
-SURFACE_THRESHOLDS = {
-    "process": 9,
-    "malfind": 9,
-    "netscan": 9,
-    "scheduled_tasks": 9,
-    "userassist": 9,
-    "ssdt": 9,
-}
+risk_bands          = {"critical": 20, "high": 14, "medium": 9}
+confidence_floor    = 0.35
+category_thresholds = {"process": 4, "connection": 5, "persistence": 2, "kernel": 9}
 ```
 
-`--min-risk medium`, `high`, or `critical` raises the effective threshold to 9,
-14, or 20. `--high-level` is equivalent to `--min-risk high`. A surface-specific
-threshold is never below a band boundary.
+The surfacing thresholds sit deliberately *below* the weight of one strong rule.
+The band carries severity, so a lone severity-4 signal — an unlinked process, an
+orphaned hive — must be able to reach the table as Low. Raising a threshold
+instead of fixing an over-firing rule hides that rule's real hits along with its
+noise; the confidence floor and a rule's own `context_only` flag do that work
+instead.
+
+`--min-risk medium`, `high`, or `critical` raises the effective threshold to the
+named band's floor, and `--high-level` is equivalent to `--min-risk high`.
+`--preset conservative|balanced|aggressive` moves bands, floor and thresholds
+together.
 
 The aggregation equation is:
 
