@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VolMemLyzer3 — Feature Extraction Report</title>
+<meta name="description" content="Interactive reference for the 520-feature VolMemLyzer memory-forensics schema.">
+<style>
+:root{
+  --ink:#17212b;
+  --muted:#5f6b76;
+  --line:#dfe4e8;
+  --surface:#f6f8fa;
+  --paper:#ffffff;
+  --blue:#195f7f;
+  --blue2:#2d7899;
+  --green:#356b51;
+  --orange:#9d5f32;
+  --purple:#746388;
+  --red:#963f3b;
+  --shadow:0 14px 40px rgba(25,35,45,.07);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:#eef1f3;color:var(--ink);
+  font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  line-height:1.58;
+}
+a{color:var(--blue);text-decoration-thickness:1px;text-underline-offset:3px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#f1f4f6;padding:.1rem .32rem;border-radius:3px}
+.shell{max-width:1180px;margin:32px auto;background:var(--paper);box-shadow:var(--shadow)}
+.topbar{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:24px;
+  padding:14px 48px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.96);backdrop-filter:blur(8px)
+}
+.brand{font-weight:780;letter-spacing:-.02em}.brand small{color:var(--muted);font-weight:550;margin-left:10px}
+.nav{display:flex;flex-wrap:wrap;gap:18px;font-size:.86rem}.nav a{text-decoration:none;color:#3e4a55}
+.hero{padding:72px 72px 44px;border-bottom:1px solid var(--line)}
+.eyebrow{margin:0 0 18px;color:var(--blue);font-size:.76rem;font-weight:750;letter-spacing:.12em;text-transform:uppercase}
+h1{max-width:980px;margin:0;font-size:clamp(3rem,7vw,5.4rem);line-height:.98;letter-spacing:-.055em;font-weight:800}
+.deck{max-width:900px;margin:26px 0 0;color:#3c4853;font-size:1.22rem;line-height:1.55}
+.meta{margin-top:26px;display:flex;flex-wrap:wrap;gap:14px 22px;color:var(--muted);font-size:.9rem}
+.metric-grid{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line)}
+.metric{min-height:138px;padding:28px 26px;border-right:1px solid var(--line)}.metric:last-child{border-right:none}
+.metric strong{display:block;font-size:2.25rem;line-height:1;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+.metric span{display:block;margin-top:11px;color:var(--muted);font-size:.88rem}
+section{padding:58px 72px;border-bottom:1px solid var(--line)}
+.section-kicker{margin:0 0 8px;color:var(--blue);font-size:.75rem;font-weight:750;text-transform:uppercase;letter-spacing:.11em}
+h2{margin:0 0 18px;font-size:2rem;letter-spacing:-.035em;line-height:1.15}h3{margin:0 0 10px;font-size:1.03rem}
+.lead{max-width:870px;color:#3f4c57;font-size:1.04rem;margin:0 0 30px}
+.callout{margin:26px 0;padding:20px 24px;border-left:4px solid var(--blue);background:var(--surface)}
+.note{color:var(--muted);font-size:.88rem}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.panel{border:1px solid var(--line);border-radius:7px;background:#fff;padding:24px}
+.panel.soft{background:var(--surface)}
+.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin:28px 0}
+.node{min-height:110px;padding:16px 12px;border:1px solid var(--line);border-radius:6px;display:flex;flex-direction:column;justify-content:center;text-align:center}
+.node b{font-size:.9rem}.node span{font-size:.76rem;color:var(--muted);margin-top:5px}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{padding:12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-size:.75rem;text-transform:uppercase;letter-spacing:.055em;color:var(--muted);background:var(--surface)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.chart{border:1px solid var(--line);border-radius:7px;padding:24px}.chart-title{font-weight:750}.chart-sub{color:var(--muted);font-size:.86rem;margin:4px 0 22px}
+.bars{height:300px;display:flex;align-items:flex-end;gap:30px;padding:12px 18px 0;border-bottom:1px solid var(--line)}
+.barcol{flex:1;text-align:center}.barvalue{font-size:1.45rem;font-weight:800;margin-bottom:8px}
+.bar{width:60%;margin:auto;background:var(--blue);border-radius:4px 4px 0 0}.bar.alt{background:#78909c}.barlabel{font-size:.8rem;color:var(--muted);margin-top:9px}
+.pill{display:inline-block;padding:3px 8px;border:1px solid var(--line);border-radius:999px;font-size:.78rem;color:#48545f}
+.controls{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin:18px 0}
+input,select{width:100%;min-height:42px;padding:9px 11px;background:white;border:1px solid var(--line);border-radius:5px;font:inherit;color:var(--ink)}
+.table-wrap{overflow:auto;max-height:640px;border:1px solid var(--line);border-radius:6px}
+.table-wrap table{min-width:860px}.table-wrap thead th{position:sticky;top:0;z-index:3}
+.result-count{font-size:.84rem;color:var(--muted);margin:8px 0}
+.boundary{border-top:3px solid var(--blue);padding:18px;border-left:1px solid var(--line);border-right:1px solid var(--line);border-bottom:1px solid var(--line);border-radius:5px}
+.footer{padding:36px 72px 54px;color:var(--muted);font-size:.86rem}
+.links{display:flex;flex-wrap:wrap;gap:14px 18px;margin-top:14px}
+@media(max-width:900px){
+ .topbar{padding:14px 22px}.nav{display:none}.hero,section,.footer{padding-left:26px;padding-right:26px}
+ .metric-grid{grid-template-columns:1fr 1fr}.metric{border-bottom:1px solid var(--line)}
+ .flow{grid-template-columns:1fr 1fr}.grid2,.grid3{grid-template-columns:1fr}
+ .controls{grid-template-columns:1fr}
+}
+@media(max-width:580px){.shell{margin:0}.metric-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}}
+@media print{body{background:white}.shell{box-shadow:none;margin:0;max-width:none}.topbar{position:static}.nav{display:none}}
+
+.feature-layout{display:grid;grid-template-columns:.9fr 1.1fr;gap:28px;align-items:center}
+.donut-wrap{display:flex;justify-content:center;align-items:center;min-height:440px}
+#donut{width:min(430px,100%);height:auto;overflow:visible}
+.arc{fill:#6f94a7;stroke:white;stroke-width:1.4;cursor:pointer;transition:.12s}.arc:hover,.arc.active{fill:var(--blue)}
+.center-num{font-size:42px;font-weight:800;fill:var(--ink);text-anchor:middle}.center-label{font-size:13px;fill:var(--muted);text-anchor:middle}
+.tooltip{position:fixed;pointer-events:none;background:#17212b;color:#fff;padding:8px 10px;border-radius:5px;font-size:.78rem;opacity:0;z-index:50}
+.rank{display:grid;grid-template-columns:115px 1fr 36px;gap:10px;align-items:center;margin:9px 0;font-size:.86rem}
+.track{height:10px;background:#edf1f3}.fill{height:100%;background:var(--blue)}
+.domain-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.domain{padding:20px;border:1px solid var(--line);border-radius:6px}
+.feature-tag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:900px){.feature-layout{grid-template-columns:1fr}.domain-grid{grid-template-columns:1fr}}
+</style></head><body>
+<div class="shell">
+<div class="topbar"><div class="brand">VolMemLyzer3 <small>Feature Extraction Report</small></div>
+<nav class="nav"><a href="#landscape">Landscape</a><a href="#pipeline">Pipeline</a><a href="#catalog">Catalog</a><a href="#semantics">Semantics</a><a href="#failure">Failure handling</a><a href="#integration">Integration</a></nav></div>
+<header class="hero">
+<p class="eyebrow">Memory forensics · quantitative schema · downstream analytics</p>
+<h1>520 features that turn Volatility artifacts into a reusable memory-image representation.</h1>
+<p class="deck">This report documents VolMemLyzer's feature-extraction layer separately from its analyst-facing triage rules. The feature schema preserves image-level measurements for statistical analysis and machine-learning pipelines while keeping the underlying forensic artifacts available for explanation and review.</p>
+<div class="meta"><span>Behaviour-Centric Cybersecurity Center</span><span><a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/blob/main/FEATURES.md">Canonical schema</a></span><span><a href="index.html">System / Performance / Analysis Report</a></span></div>
+</header>
+<div class="metric-grid">
+<div class="metric"><strong>520</strong><span>documented extracted features</span></div>
+<div class="metric"><strong>51</strong><span>forensic feature groups</span></div>
+<div class="metric"><strong>72</strong><span>extractor functions in the tree</span></div>
+<div class="metric"><strong>56</strong><span>registered plugin definitions</span></div>
+<div class="metric"><strong>1</strong><span>canonical schema: FEATURES.md</span></div>
+</div>
+
+<section>
+<p class="section-kicker">Separation of concerns</p><h2>Rules prioritize evidence. Features preserve measurements.</h2>
+<div class="grid2">
+<div class="panel"><h3>Analyst-facing rules</h3><p>Ask whether an object satisfies an investigative hypothesis and should be surfaced for review. They use explicit conditions, evidence families and bounded scoring.</p><p><a href="index.html#rules">Open the separate rule report</a></p></div>
+<div class="panel"><h3>Feature extraction</h3><p>Asks what measurable property of the memory image should be preserved for downstream statistics or modelling. A feature value is not automatically a detection.</p></div>
+</div>
+</section>
+
+<section id="pipeline">
+<p class="section-kicker">Feature pipeline</p><h2>Cached forensic artifacts become an image-level feature vector.</h2>
+<div class="flow" style="grid-template-columns:repeat(6,1fr)">
+<div class="node"><b>Memory image</b><span>case input</span></div>
+<div class="node"><b>Volatility artifacts</b><span>structured plugin output</span></div>
+<div class="node"><b>Dependency graph</b><span>extractors wait for required context</span></div>
+<div class="node"><b>Normalization</b><span>plugin-specific parsing</span></div>
+<div class="node"><b>Aggregation</b><span>image-level measurements</span></div>
+<div class="node"><b>Feature row</b><span>CSV / JSON / analytics</span></div>
+</div>
+<div class="callout"><strong>The feature layer can reuse an already collected case.</strong><div class="note">That lets downstream experiments operate on the same forensic evidence without turning every model or statistics change into another memory-image run.</div></div>
+</section>
+
+<section id="landscape">
+<p class="section-kicker">Schema landscape</p><h2>51 groups describe different forensic surfaces.</h2>
+<p class="lead">The circle below encodes all 520 documented features by group size. Hover for counts; click a segment to filter the searchable catalog to that group. The largest groups are also ranked at right.</p>
+<div class="feature-layout">
+<div class="donut-wrap"><svg id="donut" viewBox="0 0 440 440" role="img" aria-label="Feature groups as a radial ring"></svg></div>
+<div class="panel"><h3>Largest groups</h3><div id="topGroups"></div><p class="note">The ring shows schema breadth, not security importance. A larger group simply exposes more measurements.</p></div>
+</div>
+</section>
+
+<section>
+<p class="section-kicker">Coverage domains</p><h2>The schema spans user-mode, kernel, persistence and execution context.</h2>
+<div class="domain-grid">
+<div class="domain"><h3>Processes & execution</h3><p><code>pslist</code>, <code>psscan</code>, <code>pstree</code>, <code>psxview</code>, command lines, privileges and environment-derived measurements.</p></div>
+<div class="domain"><h3>Memory mappings</h3><p>VAD structure, private executable memory and <code>malfind</code>-derived aggregates.</p></div>
+<div class="domain"><h3>Modules & drivers</h3><p>Loaded modules, module scans, drivers, callbacks, IRP and kernel-oriented state.</p></div>
+<div class="domain"><h3>Network</h3><p>Connection/socket state, address/port distributions and image-level network summaries.</p></div>
+<div class="domain"><h3>Registry & persistence</h3><p>Registry, Amcache, services, execution-history and related persistent-state measurements.</p></div>
+<div class="domain"><h3>Object & system state</h3><p>Handles, pools, mutants, symlinks, timers, windows/stations and other structural measurements.</p></div>
+</div>
+</section>
+
+<section id="catalog">
+<p class="section-kicker">Interactive catalog</p><h2>Search the canonical 520-feature schema.</h2>
+<p class="lead">The table below is populated directly from <code>FEATURES.md</code> when loaded. Group names come from its section headings, while feature semantics come from the Markdown tables. This page is a view of the canonical schema, not a parallel copy.</p>
+<div class="controls"><input id="featureSearch" type="search" placeholder="Search feature, description, interpretation…"><select id="featureGroup"><option value="">All 51 groups</option></select><select id="featureType"><option value="">All types</option></select></div>
+<div id="featureCount" class="result-count">Loading canonical feature schema…</div>
+<div class="table-wrap"><table><thead><tr><th>Feature</th><th>Group</th><th>Type</th><th>Domain</th><th>Unit</th><th>Description / interpretation</th></tr></thead><tbody id="featureBody"><tr><td colspan="6">Loading…</td></tr></tbody></table></div>
+<p class="note">Direct links such as <code>#registry</code>, <code>#vadinfo</code> or <code>#handles</code> filter the catalog automatically. If a local browser blocks the live fetch, use the <a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/blob/main/FEATURES.md">canonical schema</a>; GitHub Pages can load it normally.</p>
+</section>
+
+<section id="semantics">
+<p class="section-kicker">How to read a feature</p><h2>A measurement needs type, domain, unit and aggregation context.</h2>
+<div class="grid3">
+<div class="panel"><h3>Name</h3><p><code>amcache.nonMicrosoftRatio</code></p><p class="note">Stable schema identifier.</p></div>
+<div class="panel"><h3>Mathematical meaning</h3><p>Type, expected domain and unit distinguish counts, ratios, timestamps, entropy and memory-size measurements.</p></div>
+<div class="panel"><h3>Interpretation</h3><p>Many values require a host-class baseline. “Higher” or “rarer” is not automatically “malicious.”</p></div>
+</div>
+<div class="callout"><strong>Feature extraction is not malware classification.</strong><div class="note">The schema records repeatable quantitative properties of the memory image. A separate validated method is required to turn those measurements into a classifier or statistical conclusion.</div></div>
+</section>
+
+<section id="failure">
+<p class="section-kicker">Missing data</p><h2>Unavailable is different from zero.</h2>
+<div class="grid2">
+<div class="panel"><h3>Measured zero</h3><p>The relevant artifact was successfully produced and the extractor measured a zero-valued quantity.</p></div>
+<div class="panel"><h3>Measurement unavailable</h3><p>The upstream plugin failed or did not produce usable evidence. VolMemLyzer records the failed plugin rather than silently converting absence into a benign value.</p></div>
+</div>
+<p class="lead" style="margin-top:24px">This distinction is essential for statistical validity. Treating collection failure as a real zero contaminates both descriptive analysis and model training.</p>
+</section>
+
+<section id="integration">
+<p class="section-kicker">Downstream integration</p><h2>Deep links let other projects reference the schema without re-explaining it.</h2>
+<table>
+<thead><tr><th>Concept</th><th>Stable target</th></tr></thead>
+<tbody>
+<tr><td>Complete feature system</td><td><code>features.html</code></td></tr>
+<tr><td>Registry features</td><td><code>features.html#registry</code></td></tr>
+<tr><td>VAD features</td><td><code>features.html#vadinfo</code></td></tr>
+<tr><td>Handle features</td><td><code>features.html#handles</code></td></tr>
+<tr><td>Network features</td><td><code>features.html#netscan</code></td></tr>
+<tr><td>Analysis rules</td><td><code>index.html#rules</code></td></tr>
+<tr><td>Scheduler</td><td><code>index.html#scheduler</code></td></tr>
+</tbody></table>
+<p class="note" style="margin-top:16px">This is the pattern MemTriage should use: explain what MemTriage does, then link here when the reader wants the extraction schema or VolMemLyzer execution details.</p>
+</section>
+
+<section>
+<p class="section-kicker">Reproducibility</p><h2>The interactive page should never become the source of truth.</h2>
+<p class="lead">Feature definitions remain version-controlled in <code>FEATURES.md</code>; extractor implementations remain in the VolMemLyzer source tree. The browser report exists to make the schema searchable, visual and linkable.</p>
+<div class="links"><a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/blob/main/FEATURES.md">FEATURES.md</a><a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/blob/main/src/volmemlyzer/extractors.py">Extractor implementations</a><a href="index.html">System / Performance / Analysis Report</a></div>
+</section>
+
+<footer class="footer"><strong>VolMemLyzer3</strong> · feature extraction report<div class="links"><a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool">Repository</a><a href="https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/blob/main/FEATURES.md">Canonical schema</a></div></footer>
+</div>
+<div id="tip" class="tooltip"></div>
+<script>
+const GROUPS={"amcache": 14, "bigpools": 8, "callbacks": 12, "cmdline": 10, "cmdscan": 5, "consoles": 7, "deskscan": 7, "devicetree": 10, "dlllist": 12, "driverirp": 8, "drivermodule": 4, "driverscan": 9, "envars": 10, "filescan": 8, "getsids": 10, "handles": 30, "hivescan": 3, "info": 7, "joblinks": 5, "ldrmodules": 11, "malfind": 13, "mbrscan": 9, "mem": 1, "misc": 9, "modscan": 14, "modules": 9, "mutantscan": 12, "netscan": 19, "poolscanner": 7, "privileges": 13, "pslist": 10, "psscan": 14, "pstree": 11, "psxview": 14, "registry": 40, "servicesids": 8, "shimcache": 6, "skeleton_key": 5, "ssdt": 8, "statistics": 9, "svclist": 6, "svcscan": 14, "symlinkscan": 9, "threads": 4, "timers": 10, "vadinfo": 22, "vadwalk": 6, "verinfo": 9, "virtmap": 8, "windows": 6, "winsta": 5};
+const total=Object.values(GROUPS).reduce((a,b)=>a+b,0);
+const sorted=Object.entries(GROUPS).sort((a,b)=>b[1]-a[1]);
+const svg=document.getElementById("donut"), tip=document.getElementById("tip");
+function polar(cx,cy,r,a){const rad=(a-90)*Math.PI/180;return [cx+r*Math.cos(rad),cy+r*Math.sin(rad)];}
+function arcPath(cx,cy,r1,r2,a0,a1){
+ const [x0,y0]=polar(cx,cy,r2,a0),[x1,y1]=polar(cx,cy,r2,a1),[x2,y2]=polar(cx,cy,r1,a1),[x3,y3]=polar(cx,cy,r1,a0);
+ const large=(a1-a0)>180?1:0; return `M ${x0} ${y0} A ${r2} ${r2} 0 ${large} 1 ${x1} ${y1} L ${x2} ${y2} A ${r1} ${r1} 0 ${large} 0 ${x3} ${y3} Z`;
+}
+let ang=0;
+sorted.forEach(([g,n])=>{const span=n/total*360;const p=document.createElementNS("http://www.w3.org/2000/svg","path");p.setAttribute("d",arcPath(220,220,112,185,ang,ang+span));p.setAttribute("class","arc");p.dataset.group=g;p.addEventListener("mousemove",e=>{tip.style.opacity=1;tip.style.left=(e.clientX+12)+"px";tip.style.top=(e.clientY+12)+"px";tip.textContent=`${g} · ${n} features`;});p.addEventListener("mouseleave",()=>tip.style.opacity=0);p.addEventListener("click",()=>{location.hash=g;applyHash();});svg.appendChild(p);ang+=span;});
+const n=document.createElementNS("http://www.w3.org/2000/svg","text");n.setAttribute("x",220);n.setAttribute("y",214);n.setAttribute("class","center-num");n.textContent="520";svg.appendChild(n);
+const l=document.createElementNS("http://www.w3.org/2000/svg","text");l.setAttribute("x",220);l.setAttribute("y",238);l.setAttribute("class","center-label");l.textContent="features · 51 groups";svg.appendChild(l);
+document.getElementById("topGroups").innerHTML=sorted.slice(0,12).map(([g,n])=>`<div class="rank"><span>${g}</span><div class="track"><div class="fill" style="width:${n/40*100}%"></div></div><strong>${n}</strong></div>`).join("");
+
+const FEATURE_URL="https://raw.githubusercontent.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/main/FEATURES.md";
+let featureRows=[];
+function clean(s){return s.replace(/`/g,"").replace(/\*\*/g,"").trim();}
+function parseFeatures(md){
+ const lines=md.split(/\r?\n/);let group="",rows=[];
+ for(let i=0;i<lines.length;i++){
+  if(lines[i].startsWith("## ") && !lines[i].includes("Table of Contents")) group=clean(lines[i].slice(3)).replace(/\s*\(\d+\)\s*$/,"");
+  if(lines[i].startsWith("| Feature |") && i+1<lines.length){
+   const heads=lines[i].split("|").slice(1,-1).map(clean);i+=2;
+   while(i<lines.length && lines[i].startsWith("|")){
+    const cells=lines[i].split("|").slice(1,-1).map(clean);let o={group};heads.forEach((h,j)=>o[h]=cells[j]||"");rows.push(o);i++;
+   }i--;
+  }
+ }
+ return rows;
+}
+function renderFeatures(){
+ const q=document.getElementById("featureSearch").value.toLowerCase(),g=document.getElementById("featureGroup").value,t=document.getElementById("featureType").value;
+ const shown=featureRows.filter(r=>!g||r.group===g).filter(r=>!t||r.Type===t).filter(r=>JSON.stringify(r).toLowerCase().includes(q));
+ document.getElementById("featureCount").textContent=`${shown.length} of ${featureRows.length} features`;
+ document.getElementById("featureBody").innerHTML=shown.map(r=>`<tr><td><code>${r.Feature||""}</code></td><td>${r.group}</td><td>${r.Type||""}</td><td>${r.Domain||""}</td><td>${r.Unit||""}</td><td>${r.Description||""}</td></tr>`).join("")||'<tr><td colspan="6">No matching features.</td></tr>';
+ document.querySelectorAll(".arc").forEach(p=>p.classList.toggle("active",g&&p.dataset.group===g));
+}
+function applyHash(){
+ const h=decodeURIComponent(location.hash.replace("#",""));
+ if(h && GROUPS[h]){document.getElementById("featureGroup").value=h;renderFeatures();document.getElementById("catalog").scrollIntoView();}
+}
+fetch(FEATURE_URL).then(r=>r.text()).then(md=>{
+ featureRows=parseFeatures(md);
+ const gs=[...new Set(featureRows.map(r=>r.group))].sort(),ts=[...new Set(featureRows.map(r=>r.Type).filter(Boolean))].sort();
+ document.getElementById("featureGroup").innerHTML='<option value="">All 51 groups</option>'+gs.map(v=>`<option>${v}</option>`).join("");
+ document.getElementById("featureType").innerHTML='<option value="">All types</option>'+ts.map(v=>`<option>${v}</option>`).join("");
+ renderFeatures();applyHash();
+}).catch(()=>{document.getElementById("featureCount").textContent="Live feature catalog could not be loaded in this local preview.";document.getElementById("featureBody").innerHTML='<tr><td colspan="6">Open FEATURES.md using the link below the table. The group visualization above remains complete.</td></tr>';})
+;["featureSearch","featureGroup","featureType"].forEach(id=>document.getElementById(id).addEventListener("input",renderFeatures));
+window.addEventListener("hashchange",applyHash);
+</script>
+</body></html>

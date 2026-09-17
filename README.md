@@ -1,257 +1,268 @@
+<div align="center">
+
 # VolMemLyzer3
 
-Volatility 3 CLI for parallel plugin runs, feature extraction, and stepwise DFIR triage.
+### Turn a Windows memory image into correlated forensic findings and ML-ready features — without manually coordinating dozens of Volatility plugins.
 
-[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+Built on **Volatility 3** for dependency-aware plugin execution, artifact reuse, forensic triage, and large-scale feature extraction.
+
+[**Technical Report**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/) ·
+[**Analysis Rules**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#rules) ·
+[**Feature Explorer**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/features.html) ·
+[**Benchmarks**](benchmarks/) ·
+[**Examples**](examples/) ·
+[**Releases**](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases)
+
 [![CI](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/actions/workflows/ci.yml/badge.svg)](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
-![Volatility](https://img.shields.io/badge/Volatility-3.x-black)
-[![Release](https://img.shields.io/github/v/release/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool)](https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool/releases)
+![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
+![Volatility](https://img.shields.io/badge/Volatility-3.x-24292f)
+[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
 
-## Results
+</div>
 
-`volmemlyzer extract` of 10 plugins from `benchmarks/plugins.yaml` — `pslist`, `pstree`, `dlllist`, `cmdline`, `registry.hivelist`, `modules`, `svcscan`, `getsids`, `privileges`, `envars` — on a `4412228315`-byte Windows image (SHA-256 `777d71d7106e5ded19592c075058da12049bfcd658221e70f0579ad4bbd9cff4`, not redistributed):
+---
 
-| config | workers | cache | median | range |
-|---|---:|---|---:|---|
-| serial | 1 | off | 172.16s | 166.57–173.79 |
-| parallel | 4 | off | 71.12s | 69.49–73.50 |
-| cache-warm | 4 | on | 3.1517s | 3.1483–3.4141 |
+## What this project does
 
-Parallel vs serial is `2.4×` (`172.16/71.12`). Cache-warm is artifact reuse, not a Volatility speedup. Median of 3 runs on `Intel(R) Core(TM) i7-1068NG7 CPU @ 2.30GHz, 8 logical cores, 17179869184 bytes RAM, macOS 26.6.2`, Volatility 3 `2.28.0`. The tree has 72 extractor functions, 56 registered plugins, and 3 workflows (`analyze`, `run`, `extract`). Method and raw results: `benchmarks/`.
+Volatility exposes powerful memory-forensics plugins, but a real investigation still has to coordinate them:
+
+- some plugins are expensive;
+- some depend on context produced by others;
+- outputs are stored separately and must be correlated manually;
+- repeated analysis can rerun work that has already been completed; and
+- machine-learning or statistical pipelines need structured image-level measurements rather than raw plugin tables.
+
+**VolMemLyzer is the orchestration and analysis layer around Volatility 3.**
+
+It runs the required plugins, respects their dependencies, reuses completed artifacts, correlates evidence across plugin outputs, and can turn the same case into a **520-feature image-level representation** for downstream analysis.
+
+| Capability | What it provides |
+|---|---|
+| **Dependency-aware execution** | Independent plugins run concurrently; a dependent starts as soon as its own prerequisites finish. |
+| **Artifact reuse** | Cached Volatility results are reused or converted instead of blindly rerunning the memory image. |
+| **Correlated forensic triage** | Process, private-memory, network, persistence, execution-history, and kernel evidence are scored together. |
+| **Feature extraction** | **520 features across 51 groups** for statistics and ML workflows. |
+
+VolMemLyzer does **not** replace Volatility. Volatility remains the forensic engine; VolMemLyzer manages how its outputs are collected, reused, correlated, and consumed.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Windows memory image] --> B[Volatility 3]
+    B --> C[Dependency-aware scheduler]
+    C --> D[Reusable artifact cache]
+    D --> E[Raw plugin results]
+    D --> F[Correlated analyst triage]
+    D --> G[520-feature extraction]
+    F --> H[Prioritized review queue]
+    G --> I[CSV / JSON / downstream analytics]
+```
+
+A slow plugin blocks only the work that actually depends on it. The scheduler releases downstream work as soon as its prerequisites complete instead of waiting for an unrelated batch to finish.
+
+[**See the execution model →**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#scheduler)
+
+## Measured execution
+
+On the committed benchmark, extracting the same 10-plugin set from a 4.41 GB Windows memory image produced:
+
+| Configuration | Workers | Cache | Median wall-clock |
+|---|---:|---|---:|
+| Serial | 1 | off | **172.16 s** |
+| Parallel | 4 | off | **71.12 s** |
+| Cache warm | 4 | on | **3.1517 s** |
+
+Parallel execution reduces measured wall-clock by **2.4×** on this workload.
+
+The warm-cache result measures **artifact reuse**, not faster Volatility execution.
 
 <p align="center">
-  <img src="docs/figures/extract-wall-clock.svg" alt="Extract wall-clock: serial 172.16s, parallel 71.12s, cache-warm 3.1517s" width="100%">
+  <img src="docs/figures/extract-wall-clock.svg" alt="VolMemLyzer extraction benchmark" width="90%">
 </p>
-<sub>Median wall-clock of <code>volmemlyzer extract</code> on the pinned 10-plugin set. Serial and parallel use <code>--no-cache</code>. Cache-warm is artifact reuse, not a Volatility speedup. Regenerated from <code>benchmarks/results.json</code>.</sub>
 
-**Stable tool.** Not an EDR, antivirus, or live endpoint monitor.
+[**Benchmark method and raw results →**](benchmarks/)
 
-[MemTriage](https://github.com/YaCnDehfuli/MemTriage) consumes this extract layer. [VADViT](https://github.com/YaCnDehfuli/VADViT) is the model MemTriage runs after extraction. VolMemLyzer does not classify malware.
+## What analysis looks like
 
-## Evidence report
+The analysis workflow turns separate forensic observations into a review queue with explicit evidence.
 
-Open the **[interactive analysis and feature report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/)** for the score model, searchable rule catalog, cache validation, and a searchable view of all 520 extracted features.
+In the current example analysis:
 
-The repository-native sources remain available for audit and change review:
+- **118 processes** are present in the census;
+- **31 indicators** are surfaced;
+- the posture contains **3 Critical, 1 High, 6 Medium, and 21 Low** review items;
+- the highest-priority `malware.exe` process reaches **23.6/30** with **94.6%** confidence from independent private-memory, credential-access, loader-walk, and privilege evidence.
 
-- [exact analysis rules, regular expressions, weights, and ATT&CK alignment](docs/ANALYSIS_RULES.md);
-- [semantic feature catalog](FEATURES.md); and
-- [machine-readable cache-validation metadata](docs/analysis-cache-validation.json).
+The important part is not the label. Each object carries the signals that fired and explains why it moved up the queue.
 
-## Quickstart
+[**Open the analysis report →**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#validation)  
+[**Search the exact rule conditions →**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#rules)  
+[**Read the canonical rule specification →**](docs/ANALYSIS_RULES.md)
 
-```bash
-git clone https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool.git
-cd VolMemLyzer3-CLI_forensic_tool
-python -m pip install -e .
-volmemlyzer --help
-volmemlyzer analyze -i /cases/host.vmem
-volmemlyzer extract -i /cases/host.vmem -f json
-```
+## Three workflows
 
-The repository release is `v3.1.0`. PyPI currently publishes
-`volmemlyzer==3.0.1`; install from a tagged checkout to use the 3.1 analysis and
-reporting changes. A clean checkout of this tree is the source of the measured
-figure above.
-
-## Requirements
-
-- Python 3.9 or later
-- A supported Volatility 3 installation
-
-VolMemLyzer resolves Volatility in this order: an explicit `--vol-path` or `VOL_PATH` value, the installed `volatility3` Python module, the `vol` command on `PATH`, and common local `vol.py` locations.
-
-## CLI reference
-
-Global options must appear before the subcommand:
-
-```text
---vol-path PATH     Path to vol or vol.py; auto-detected when omitted
---renderer NAME     json, jsonl, csv, pretty, quick, or none
---timeout SECONDS   Per-plugin timeout, default 1800; 0 disables the cap
--j, --jobs N        Number of parallel workers, default half the CPU count
---log-level LEVEL   CRITICAL, ERROR, WARNING, INFO, or DEBUG
-```
-
-Plugins run against a dependency graph rather than in lockstep batches: each one
-starts as soon as its own inputs are ready, so a long pool scan never holds up
-work that does not depend on it. Raise `-j` to overlap more of them.
-
-Plugin names are resolved against the Volatility you actually have installed, so
-relocations such as `windows.malfind` moving to `windows.malware.malfind` are
-handled without changes here. `volmemlyzer list --registry` prints the resolved
-name for every extractor and flags anything your build does not provide.
-
-The complete feature schema is documented in [FEATURES.md](FEATURES.md) and can
-be searched by plugin group in the
-[interactive report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#features).
-
-### `analyze`
-
-Runs the DFIR overview for a single image.
+### Analyze — prioritize what deserves review
 
 ```bash
-volmemlyzer \
-  --vol-path /opt/volatility3/vol.py \
-  --renderer json \
-  --timeout 600 \
-  -j 4 \
-  analyze \
+volmemlyzer -j 4 analyze \
   -i /cases/host.vmem \
   -o /cases/.volmemlyzer \
-  --steps 0,1,2,3,4,5 \
-  --json
+  --deep
 ```
 
-Every plugin the requested steps need is collected in a single scheduled run
-before any step interprets its output, so the steps overlap instead of queueing.
+The analyst-facing layer spans six surfaces:
 
-Use `--no-cache` to force fresh plugin runs. Supported step aliases include
-`bearings`, `processes`, `injections`, `network`, `persistence`, `kernel`, and
-`ssdt`.
+- process census and lineage;
+- executable private memory;
+- network state;
+- persistence and execution history;
+- kernel dispatch integrity; and
+- image/context bearings.
 
-### Reading the risk column
+Related observations are correlated into evidence families so repeated symptoms of one hypothesis do not artificially inflate a score.
 
-One engine scores every artifact: `volmemlyzer.scoring`. A rule is data — it
-carries its own ATT&CK technique, a severity and a source confidence, and a pure
-predicate — so each row says which rules fired, what they read, and what they
-map to, instead of a per-step constant. The steps orchestrate the plugins and
-render that output; they do not score.
-
-Findings sit on one ladder — Low, Medium (9), High (14), Critical (20).
-`--min-risk` raises the floor (`--high-level` is the same thing as `--min-risk
-high`), and `--preset conservative|balanced|aggressive` moves the band cut-offs,
-the confidence floor and the per-category surfacing thresholds together.
-
-**These bands surface signal for review. They are not detections.** A Critical
-row means several unusual things line up on one object, not that it is
-malicious; plenty of legitimate software will land in the table, and a quiet
-table is not a clean machine. Bands and thresholds live in
-`volmemlyzer.scoring.profile`, individual rule weights in a profile's
-`rule_overrides`, and the path lists in `utilities.SUSPICIOUS_DIRS` /
-`USER_INSTALL_SUBDIRS`, so tuning for your estate is a data edit rather than a
-code change.
-
-The complete security-logic specification—including every rule, weight, regular
-expression, evidence family, ATT&CK alignment, false-positive control, and
-cache-only validation result—is in
-**[Analysis rules and validation](docs/ANALYSIS_RULES.md)**. For a concise,
-filterable presentation, open the
-**[interactive evidence report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#rules)**.
-
-`--deep` adds `psscan`, `psxview`, `netscan`, `registry.hivescan`, and the SSDT
-integrity view. `psxview` itself invokes `psscan`, `thrdscan`, and a CSRSS handle
-sweep and can dominate a run on a large image. Quick mode excludes those pool
-and cross-view scanners; `malfind`, `pslist`, `pstree`, scheduled tasks, and
-UserAssist remain available.
-
-### `run`
-
-Runs raw Volatility plugins and stores their artifacts.
+### Run — execute and retain Volatility artifacts
 
 ```bash
-volmemlyzer \
-  --renderer json \
-  -j 4 \
-  run \
+volmemlyzer -j 4 run \
   -i /cases/host.vmem \
   -o /cases/.volmemlyzer \
   --plugins pslist,pstree,psscan
 ```
 
-Use either `--plugins` to include specific plugins or `--drop` to exclude plugins; do not combine them.
+Results are retained for later analysis and extraction.
 
-### `extract`
+VolMemLyzer also resolves configured plugin names against the Volatility installation actually present, which helps when plugins move between namespaces across Volatility releases.
 
-Runs the required plugins and writes ML-ready features.
+### Extract — build a reusable feature vector
 
 ```bash
-volmemlyzer \
-  -j 4 \
-  extract \
-  -i /cases \
+volmemlyzer -j 4 extract \
+  -i /cases/host.vmem \
   -o /cases/.volmemlyzer \
-  -f csv \
-  --drop netscan
+  -f csv
 ```
 
-For directory input, VolMemLyzer scans supported memory-image extensions recursively and writes one feature file per image under `<outdir>/features/`.
+The extraction layer currently exposes:
 
-### `list`
+**520 features · 51 groups · 72 extractor functions · 56 registered plugin definitions**
 
-Shows registered feature extractors, detected Volatility plugins, or both.
+The schema covers processes, registry, networking, VADs, modules, services, handles, privileges, kernel structures, persistence artifacts, and other memory-derived measurements.
+
+[**Open the interactive Feature Explorer →**](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/features.html)  
+[**Read the canonical feature schema →**](FEATURES.md)
+
+## Artifact reuse
+
+Every successful plugin result becomes a reusable artifact.
+
+When a later workflow needs the same evidence, VolMemLyzer can:
+
+1. use an exact cached result;
+2. convert a compatible cached artifact into the required format; or
+3. rerun Volatility only when no usable artifact exists.
+
+A failed or zero-byte artifact is recorded as **unavailable**. It is never silently interpreted as a clean result.
+
+## Evidence prioritization, not malware classification
+
+VolMemLyzer's analysis score is a bounded ordinal evidence value.
+
+```text
+0–8    Low
+9–13   Medium
+14–19  High
+20–30  Critical
+```
+
+The engine retains the strongest observation from each correlated hypothesis family, sums independent evidence, and caps the result at 30.
+
+A high score means several review-worthy observations align on the same object.
+
+It does **not** mean:
+
+- malware probability;
+- model confidence;
+- confirmed ATT&CK activity; or
+- proof that an intrusion occurred.
+
+## Quick start
 
 ```bash
-volmemlyzer list --registry
-volmemlyzer list --vol --grep process
+git clone https://github.com/YaCnDehfuli/VolMemLyzer3-CLI_forensic_tool.git
+cd VolMemLyzer3-CLI_forensic_tool
+
+python -m venv .venv
+source .venv/bin/activate
+
+python -m pip install -e .
+
+volmemlyzer --help
+volmemlyzer analyze -i /cases/host.vmem
 ```
 
-Run `volmemlyzer <command> --help` for the complete option list.
+Requirements:
+
+- Python 3.9+
+- Volatility 3
+- a memory image supported by the installed Volatility build
+
+## CLI
 
 <p align="center">
-  <img src="examples/VolMemLyzer.png" alt="VolMemLyzer CLI help" width="100%">
+  <img src="examples/VolMemLyzer.png" alt="VolMemLyzer CLI" width="100%">
 </p>
-<sub>CLI help for <code>analyze</code>, <code>run</code>, <code>extract</code>, and <code>list</code>.</sub>
 
-## Legacy compatibility command
+The CLI provides `analyze`, `run`, `extract`, and `list` workflows. Python API examples are available in [`examples/`](examples/).
 
-`main.py` remains available for scripts written for earlier releases. It can process a file or directory and produce one aggregated feature file:
+## Used by MemTriage
 
-```bash
-python main.py \
-  -f /cases \
-  -o /cases/output \
-  -V /opt/volatility3/vol.py \
-  -F csv
-```
+[MemTriage](https://github.com/YaCnDehfuli/MemTriage) consumes VolMemLyzer's memory-forensics extraction and artifact layer.
 
-New integrations should use the packaged `volmemlyzer` command.
+That separation is intentional: MemTriage can focus on the analyst workspace while linking directly back here for plugin execution, caching, rule logic, or feature-schema details.
 
-## Outputs and caching
+## Documentation
 
-- Raw plugin artifacts are written under the selected output directory.
-- Extracted features are written under `<outdir>/features/`.
-- Existing artifacts are reused unless `--no-cache` is supplied.
-- JSON is the recommended renderer for downstream feature extraction.
+| Resource | Purpose |
+|---|---|
+| [Technical report](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/) | Architecture, scheduler, artifact reuse, performance, analysis, rules, and observed triage output |
+| [Analysis rule explorer](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/#rules) | Search the analyst-facing rule conditions |
+| [Exact rule specification](docs/ANALYSIS_RULES.md) | Inputs, predicates, weights, evidence families, ATT&CK alignment, and controls |
+| [Feature explorer](https://yacndehfuli.github.io/VolMemLyzer3-CLI_forensic_tool/features.html) | Interactive view of the 520-feature schema |
+| [Feature schema](FEATURES.md) | Canonical feature definitions |
+| [Benchmarks](benchmarks/) | Method, environment, plugin set, and raw measurements |
+| [Examples](examples/) | CLI and Python API examples |
+| [Changelog](CHANGELOG.md) | Release history |
 
-## Troubleshooting
+## Scope
 
-- If Volatility cannot be found, pass `--vol-path` or set `VOL_PATH`.
-- If an artifact cannot be written, confirm that `--outdir` names a writable directory.
-- Quote paths that contain spaces, especially on Windows.
-- If a cached artifact cannot be converted to the requested format, VolMemLyzer reruns the plugin with the selected renderer.
+VolMemLyzer is a memory-forensics orchestration, analysis, and extraction framework.
 
-## Limitations
+It is **not** an EDR, antivirus, live endpoint monitor, or malware classifier.
 
-The README figure is wall-clock of `volmemlyzer extract` on the pinned
-plugin list in `benchmarks/plugins.yaml`, not the full registry and not an
-end-to-end case. Byte-walk, dump, and pool-wide scanners are excluded;
-`psscan` and `netscan` timed out on this image and are not in the list.
-Serial and parallel runs disable the artifact cache; cache-warm
-is reported separately. Different images, Volatility builds, worker counts, and
-hosts will not reproduce the same seconds. Risk bands in `analyze` are review
-signals, not detections. The tool does not monitor endpoints and is not an EDR.
+Analysis scores prioritize evidence for human review. Different images, Volatility versions, plugin populations, worker counts, and systems will produce different forensic and performance results.
 
 ## Citation
 
-For background on VolMemLyzer V1 and V2, cite:
+For the original VolMemLyzer research lineage:
 
-> A. H. Lashkari, B. Li, T. L. Carrier, and G. Kaur, “VolMemLyzer: Volatile Memory Analyzer for Malware Classification using Feature Engineering,” 2021 RDAAPS, pp. 1–8. DOI: [10.1109/RDAAPS48126.2021.9452028](https://doi.org/10.1109/RDAAPS48126.2021.9452028).
+> A. H. Lashkari, B. Li, T. L. Carrier, and G. Kaur,  
+> “VolMemLyzer: Volatile Memory Analyzer for Malware Classification using Feature Engineering,”  
+> 2021 RDAAPS, pp. 1–8.  
+> DOI: https://doi.org/10.1109/RDAAPS48126.2021.9452028
 
 ## Team
 
-- [Arash Habibi Lashkari](http://ahlashkari.com/index.asp) — founder and project owner
-- [Yasin Dehfouli](https://github.com/YaCnDehfuli) — V3 developer and maintainer
-- [Abhay Pratap Singh](https://github.com/Abhay-Sengar) — V2 researcher and developer
-- [Beiqi Li](https://github.com/beiqil) — V1 developer
-- [Tristan Carrier](https://github.com/TristanCarrier) — V1 researcher and developer
-- [Gurdip Kaur](https://www.linkedin.com/in/gurdip-kaur-738062164/) — researcher
-
-## Acknowledgments
-
-This project received support from the Natural Sciences and Engineering Research Council of Canada (NSERC), grant RGPIN-2020-04701 awarded to Arash Habibi Lashkari, and from the Mitacs Globalink Research Internship program.
+- **Arash Habibi Lashkari** — founder and project owner
+- **Yasin Dehfouli** — VolMemLyzer3 developer and maintainer
+- **Abhay Pratap Singh** — VolMemLyzer2 researcher and developer
+- **Beiqi Li** — VolMemLyzer1 developer
+- **Tristan Carrier** — VolMemLyzer1 researcher and developer
+- **Gurdip Kaur** — researcher
 
 ## License
 
-VolMemLyzer is free software licensed under the [GNU General Public License, version 3 or later](LICENSE). This license applies to the repository; Volatility and other dependencies remain subject to their own licenses.
+VolMemLyzer is licensed under the [GNU General Public License v3 or later](LICENSE).
+
+Volatility and other dependencies retain their own licenses.
